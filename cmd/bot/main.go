@@ -18,6 +18,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/ops"
+	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
 // version is overridden at build time:
@@ -51,7 +52,19 @@ func run(log *slog.Logger) error {
 
 	messenger := discord.SessionMessenger{S: s}
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce)
-	router := discord.NewRouter(log, announcer, cfg.Channels.Test)
+
+	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
+	var source discord.StreamSource
+	if cfg.YouTube.APIKey != "" {
+		source = youtube.NewClient(cfg.YouTube.APIKey)
+	}
+
+	router := discord.NewRouter(log, discord.Deps{
+		Announcer:        announcer,
+		DevChannelID:     cfg.Channels.Test,
+		Source:           source,
+		YouTubeChannelID: cfg.YouTube.ChannelID,
+	})
 	s.AddHandler(router.OnInteraction)
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		log.Info("connected to Discord", "bot", r.User.Username)

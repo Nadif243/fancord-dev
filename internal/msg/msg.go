@@ -20,6 +20,11 @@ const (
 	DevOnly                   = "Perintah ini hanya bisa dipakai di channel dev."
 	DevStreamDescription      = "Simulasikan stream palsu (khusus dev)"
 	DevStreamStateDescription = "Status stream yang ingin disimulasikan"
+
+	DevCheckDescription        = "Cek stream terbaru di YouTube tanpa mengumumkan (khusus dev)"
+	DevCheckChannelDescription = "ID channel YouTube (UC...); kosong = channel Yuura"
+	DevCheckNoKey              = "YouTube belum diatur. Isi YOUTUBE_API_KEY di .env lalu jalankan ulang bot."
+	DevCheckNoChannel          = "Belum ada channel. Isi YOUTUBE_CHANNEL_ID di .env atau isi opsi channel."
 )
 
 // StreamUpcoming announces a scheduled stream. The start time is shown twice: as a full date and as "in 2 hours", both rendered by Discord for each viewer.
@@ -41,6 +46,41 @@ func StreamEnded(title, url string) string {
 // DevStreamSet is the reply to /devstream.
 func DevStreamSet(state string) string {
 	return fmt.Sprintf("Stream dev sekarang: %s", state)
+}
+
+// DevCheckFailed is shown when YouTube could not be read. The detail comes from the youtube package, which never includes the API key.
+func DevCheckFailed(detail string) string {
+	return "Gagal mengecek YouTube: " + detail
+}
+
+func DevCheckNone(checked int) string {
+	return fmt.Sprintf("Dari %d video terbaru, tidak ada yang stream.", checked)
+}
+
+func DevCheckSummary(checked, streams int) string {
+	return fmt.Sprintf("Dari %d video terbaru, %d adalah stream:", checked, streams)
+}
+
+// DevCheckLine is one stream in the /devcheck answer. icon says its state.
+func DevCheckLine(icon, title string, start time.Time) string {
+	title = shorten(title, 60)
+	if start.IsZero() {
+		return fmt.Sprintf("%s %s", icon, title)
+	}
+	return fmt.Sprintf("%s %s · %s", icon, title, stamp(start))
+}
+
+func DevCheckMore(n int) string {
+	return fmt.Sprintf("…dan %d lainnya", n)
+}
+
+// shorten cuts s to at most max characters (not bytes, so no emoji or Japanese character is ever cut in half).
+func shorten(s string, max int) string {
+	r := []rune(s)
+	if len(r) <= max {
+		return s
+	}
+	return string(r[:max-1]) + "…"
 }
 
 // Pong answers /ping. The gateway latency is 0 until Discord has answered the first heartbeat, so it is left out then.

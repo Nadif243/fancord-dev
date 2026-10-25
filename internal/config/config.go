@@ -14,6 +14,9 @@ import (
 // A Discord ID ("snowflake") is a number of 17 to 20 digits.
 var snowflake = regexp.MustCompile(`^\d{17,20}$`)
 
+// A YouTube channel ID is "UC" followed by 22 letters, digits, "-" or "_".
+var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
+
 const (
 	defaultHeartbeatSeconds = 60
 	minHeartbeatSeconds     = 15
@@ -27,11 +30,18 @@ type Channels struct {
 	Approval string // mod approval queue
 }
 
+// YouTube holds the settings for reading her channel. Both are optional, so the bot still starts without them; the commands that need them say so.
+type YouTube struct {
+	APIKey    string // secret
+	ChannelID string // her channel, starts with UC
+}
+
 type Config struct {
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
 	Channels       Channels
+	YouTube        YouTube
 	HeartbeatEvery time.Duration
 }
 
@@ -74,6 +84,15 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Ops = optionalID("CHANNEL_OPS", c.Channels.Test)
 	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
 	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
+
+	// The key is never repeated in an error message, whatever is wrong with it.
+	c.YouTube.APIKey = get("YOUTUBE_API_KEY")
+	if v := get("YOUTUBE_CHANNEL_ID"); v != "" {
+		if !youtubeChannelID.MatchString(v) {
+			problems = append(problems, "YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got "+quote(v))
+		}
+		c.YouTube.ChannelID = v
+	}
 
 	secs := defaultHeartbeatSeconds
 	if v := get("HEARTBEAT_SECONDS"); v != "" {

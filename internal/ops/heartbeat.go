@@ -9,19 +9,13 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/msg"
 )
 
-// Messenger is the little part of Discord the heartbeat needs. Keeping it an
-// interface lets the tests run without Discord.
+// Messenger is the little part of Discord the heartbeat needs. Keeping it an interface lets the tests run without Discord.
 type Messenger interface {
 	Send(channelID, content string) (messageID string, err error)
 	Edit(channelID, messageID, content string) error
 }
 
-// Heartbeat keeps ONE message in the ops channel up to date instead of
-// posting a new one every minute. Because the message shows "last beat <time>"
-// as a live relative time, a stale heartbeat is obvious at a glance: if it
-// says "last beat 20 minutes ago", the bot is down. The same
-// edit-one-message pattern is how stream announcements will change from
-// upcoming to live to ended.
+// Heartbeat keeps ONE message in the ops channel up to date instead of posting a new one every minute. Because the message shows "last beat <time>" as a live relative time, a stale heartbeat is obvious at a glance: if it says "last beat 20 minutes ago", the bot is down. The same edit-one-message pattern is how stream announcements will change from upcoming to live to ended.
 type Heartbeat struct {
 	m         Messenger
 	channelID string
@@ -62,8 +56,7 @@ func (h *Heartbeat) post(content string) string {
 	return id
 }
 
-// update edits the heartbeat message. If it cannot (someone deleted it, or
-// the first post failed) it posts a fresh one and returns the new ID.
+// update edits the heartbeat message. If it cannot (someone deleted or the first post failed) it posts a fresh one and returns the new ID.
 func (h *Heartbeat) update(id, content string) string {
 	if id != "" {
 		err := h.m.Edit(h.channelID, id, content)

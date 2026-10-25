@@ -14,6 +14,7 @@ import (
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
 
+	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/ops"
@@ -48,7 +49,9 @@ func run(log *slog.Logger) error {
 	}
 	s.Identify.Intents = discordgo.IntentsGuilds // no privileged intents needed yet
 
-	router := discord.NewRouter(log)
+	messenger := discord.SessionMessenger{S: s}
+	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce)
+	router := discord.NewRouter(log, announcer, cfg.Channels.Test)
 	s.AddHandler(router.OnInteraction)
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		log.Info("connected to Discord", "bot", r.User.Username)
@@ -76,7 +79,7 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hb := ops.NewHeartbeat(discord.SessionMessenger{S: s}, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log)
+	hb := ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log)
 	hbDone := make(chan struct{})
 	go func() {
 		hb.Run(ctx)

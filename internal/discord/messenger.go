@@ -4,8 +4,7 @@ package discord
 
 import "github.com/bwmarrin/discordgo"
 
-// SessionMessenger lets the ops package send and edit messages without
-// knowing about discordgo.
+// SessionMessenger lets the ops package send and edit messages without knowing about discordgo.
 type SessionMessenger struct {
 	S *discordgo.Session
 }

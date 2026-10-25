@@ -1,7 +1,6 @@
 // Package config reads the bot's settings from environment variables.
 //
-// Load takes the lookup function as an argument (os.Getenv in production, a
-// map lookup in tests), so it never touches the real environment itself.
+// Load takes the lookup function as an argument (os.Getenv in production, a map lookup in tests), so it never touches the real environment itself.
 package config
 
 import (
@@ -20,9 +19,7 @@ const (
 	minHeartbeatSeconds     = 15
 )
 
-// Channels are the places the bot posts to. They are separate settings so
-// that in production each can be its own channel, while in dev they can all
-// point at the one test channel.
+// Channels are the places the bot posts to. They are separate settings so that in production each can be its own channel, while in dev they can all point at the one test channel.
 type Channels struct {
 	Test     string // main dev channel: commands, embeds, buttons
 	Ops      string // heartbeat and alerts
@@ -38,8 +35,7 @@ type Config struct {
 	HeartbeatEvery time.Duration
 }
 
-// Load validates every setting and reports all problems at once, so you fix
-// the .env file in one go instead of one error per run.
+// Load validates every setting and reports all problems at once, so you fix the .env file in one go instead of one error per run.
 func Load(getenv func(string) string) (Config, error) {
 	var problems []string
 	get := func(key string) string { return strings.TrimSpace(getenv(key)) }

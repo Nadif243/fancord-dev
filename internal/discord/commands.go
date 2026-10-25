@@ -3,26 +3,54 @@ package discord
 import (
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/msg"
 )
 
 // handler runs one slash command. Returning an error only logs it; the user already got whatever the handler managed to reply.
 type handler func(s *discordgo.Session, i *discordgo.InteractionCreate) error
 
-// Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in
-// NewRouter.
+// Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
 type Router struct {
 	log      *slog.Logger
 	defs     []*discordgo.ApplicationCommand
 	handlers map[string]handler
+
+	announcer    *broadcast.Announcer
+	devChannelID string // the only channel where dev-only commands work
 }
 
-func NewRouter(log *slog.Logger) *Router {
-	r := &Router{log: log, handlers: map[string]handler{}}
+func NewRouter(log *slog.Logger, announcer *broadcast.Announcer, devChannelID string) *Router {
+	r := &Router{
+		log:          log,
+		handlers:     map[string]handler{},
+		announcer:    announcer,
+		devChannelID: devChannelID,
+	}
+
 	r.add(&discordgo.ApplicationCommand{Name: "ping", Description: msg.PingDescription}, handlePing)
+
+	// /devstream pretends a stream changed state, so the announcer can be watched in Discord without a real stream. r.handleDevStream is a "method value": a function that remembers which Router it belongs to.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "devstream",
+		Description: msg.DevStreamDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:        discordgo.ApplicationCommandOptionString,
+			Name:        "state",
+			Description: msg.DevStreamStateDescription,
+			Required:    true,
+			Choices: []*discordgo.ApplicationCommandOptionChoice{
+				{Name: "upcoming", Value: "upcoming"},
+				{Name: "live", Value: "live"},
+				{Name: "ended", Value: "ended"},
+			},
+		}},
+	}, r.handleDevStream)
+
 	return r
 }
 
@@ -75,4 +103,34 @@ func reply(s *discordgo.Session, i *discordgo.InteractionCreate, content string)
 
 func handlePing(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	return reply(s, i, msg.Pong(s.HeartbeatLatency()))
+}
+
+// handleDevStream feeds one fake stream to the announcer in the chosen state.
+func (r *Router) handleDevStream(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.ChannelID != r.devChannelID {
+		return reply(s, i, msg.DevOnly)
+	}
+
+	state := i.ApplicationCommandData().Options[0].StringValue()
+	st := broadcast.Stream{
+		VideoID: "DEVSTREAM01", // not a real video, so Discord shows no preview
+		Title:   "Stream percobaan (dev)",
+		StartAt: time.Now().Add(30 * time.Minute),
+	}
+	switch state {
+	case "upcoming":
+		st.State = broadcast.Upcoming
+	case "live":
+		st.State = broadcast.Live
+	case "ended":
+		st.State = broadcast.Ended
+	default:
+		return reply(s, i, msg.UnknownCommand)
+	}
+
+	if err := r.announcer.Update(st); err != nil {
+		_ = reply(s, i, msg.CommandFailed)
+		return fmt.Errorf("announce dev stream: %w", err)
+	}
+	return reply(s, i, msg.DevStreamSet(state))
 }

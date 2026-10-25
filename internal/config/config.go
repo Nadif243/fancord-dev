@@ -1,0 +1,104 @@
+// Package config reads the bot's settings from environment variables.
+//
+// Load takes the lookup function as an argument (os.Getenv in production, a
+// map lookup in tests), so it never touches the real environment itself.
+package config
+
+import (
+	"errors"
+	"regexp"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// A Discord ID ("snowflake") is a number of 17 to 20 digits.
+var snowflake = regexp.MustCompile(`^\d{17,20}$`)
+
+const (
+	defaultHeartbeatSeconds = 60
+	minHeartbeatSeconds     = 15
+)
+
+// Channels are the places the bot posts to. They are separate settings so
+// that in production each can be its own channel, while in dev they can all
+// point at the one test channel.
+type Channels struct {
+	Test     string // main dev channel: commands, embeds, buttons
+	Ops      string // heartbeat and alerts
+	Announce string // stream and tweet announcements
+	Approval string // mod approval queue
+}
+
+type Config struct {
+	Token          string
+	AppID          string
+	GuildID        string // optional: found from Channels.Test when empty
+	Channels       Channels
+	HeartbeatEvery time.Duration
+}
+
+// Load validates every setting and reports all problems at once, so you fix
+// the .env file in one go instead of one error per run.
+func Load(getenv func(string) string) (Config, error) {
+	var problems []string
+	get := func(key string) string { return strings.TrimSpace(getenv(key)) }
+
+	var c Config
+
+	c.Token = get("DISCORD_TOKEN")
+	switch {
+	case c.Token == "":
+		problems = append(problems, "DISCORD_TOKEN is empty (Developer Portal > Bot > Reset Token)")
+	case strings.HasPrefix(strings.ToLower(c.Token), "bot "):
+		problems = append(problems, `DISCORD_TOKEN must be the bare token, without the word "Bot"`)
+	}
+
+	requireID := func(key string) string {
+		v := get(key)
+		if !snowflake.MatchString(v) {
+			problems = append(problems, key+" must be a Discord ID (17-20 digits), got "+quote(v))
+		}
+		return v
+	}
+	optionalID := func(key, fallback string) string {
+		v := get(key)
+		if v == "" {
+			return fallback
+		}
+		if !snowflake.MatchString(v) {
+			problems = append(problems, key+" must be a Discord ID (17-20 digits), got "+quote(v))
+		}
+		return v
+	}
+
+	c.AppID = requireID("DISCORD_APP_ID")
+	c.Channels.Test = requireID("CHANNEL_TEST")
+	c.GuildID = optionalID("GUILD_ID", "")
+	c.Channels.Ops = optionalID("CHANNEL_OPS", c.Channels.Test)
+	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
+	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
+
+	secs := defaultHeartbeatSeconds
+	if v := get("HEARTBEAT_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minHeartbeatSeconds {
+			problems = append(problems, "HEARTBEAT_SECONDS must be a whole number of "+strconv.Itoa(minHeartbeatSeconds)+" or more, got "+quote(v))
+		} else {
+			secs = n
+		}
+	}
+	c.HeartbeatEvery = time.Duration(secs) * time.Second
+
+	if len(problems) > 0 {
+		return Config{}, errors.New("invalid configuration:\n  - " + strings.Join(problems, "\n  - "))
+	}
+	return c, nil
+}
+
+func quote(s string) string {
+	if s == "" {
+		return "nothing"
+	}
+	return strconv.Quote(s)
+}

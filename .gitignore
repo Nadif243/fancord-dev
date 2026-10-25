@@ -1,0 +1,8 @@
+# secrets and local state
+.env
+*.db
+*.db-journal
+
+# build output
+bin/
+*.exe

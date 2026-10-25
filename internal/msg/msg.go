@@ -23,6 +23,7 @@ const (
 
 	DevCheckDescription        = "Cek stream terbaru di YouTube tanpa mengumumkan (khusus dev)"
 	DevCheckChannelDescription = "ID channel YouTube (UC...); kosong = channel Yuura"
+	DevCheckPagesDescription   = "Jumlah halaman yang dicek, 50 video per halaman (1-5, bawaan 1)"
 	DevCheckNoKey              = "YouTube belum diatur. Isi YOUTUBE_API_KEY di .env lalu jalankan ulang bot."
 	DevCheckNoChannel          = "Belum ada channel. Isi YOUTUBE_CHANNEL_ID di .env atau isi opsi channel."
 )
@@ -57,8 +58,10 @@ func DevCheckNone(checked int) string {
 	return fmt.Sprintf("Dari %d video terbaru, tidak ada yang stream.", checked)
 }
 
-func DevCheckSummary(checked, streams int) string {
-	return fmt.Sprintf("Dari %d video terbaru, %d adalah stream:", checked, streams)
+// DevCheckSummary shows the totals, so a count can be compared with YouTube's own Live tab at a glance.
+func DevCheckSummary(checked, upcoming, live, ended int) string {
+	return fmt.Sprintf("Dari %d video terbaru, %d adalah stream (⏰ %d · 🔴 %d · ⚫ %d):",
+		checked, upcoming+live+ended, upcoming, live, ended)
 }
 
 // DevCheckLine is one stream in the /devcheck answer. icon says its state.

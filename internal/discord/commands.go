@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
@@ -19,7 +20,7 @@ type handler func(s *discordgo.Session, i *discordgo.InteractionCreate) error
 // StreamSource is anything that can list a channel's recent streams.
 // *youtube.Client satisfies it without knowing this interface exists.
 type StreamSource interface {
-	RecentStreams(ctx context.Context, channelID string) (checked int, streams []broadcast.Stream, err error)
+	RecentStreams(ctx context.Context, channelID string, pages int) (checked int, streams []broadcast.Stream, err error)
 }
 
 // Deps is everything the commands need from the rest of the bot, gathered in
@@ -69,6 +70,11 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 			Type:        discordgo.ApplicationCommandOptionString,
 			Name:        "channel",
 			Description: msg.DevCheckChannelDescription,
+			Required:    false,
+		}, {
+			Type:        discordgo.ApplicationCommandOptionInteger,
+			Name:        "pages",
+			Description: msg.DevCheckPagesDescription,
 			Required:    false,
 		}},
 	}, r.handleDevCheck)
@@ -167,9 +173,13 @@ func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCr
 	}
 
 	channelID := r.deps.YouTubeChannelID
+	pages := 1
 	for _, opt := range i.ApplicationCommandData().Options {
-		if opt.Name == "channel" {
+		switch opt.Name {
+		case "channel":
 			channelID = strings.TrimSpace(opt.StringValue())
+		case "pages":
+			pages = int(opt.IntValue()) // the youtube package keeps it within 1..MaxPages
 		}
 	}
 	if channelID == "" {
@@ -183,7 +193,7 @@ func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCr
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	checked, streams, err := r.deps.Source.RecentStreams(ctx, channelID)
+	checked, streams, err := r.deps.Source.RecentStreams(ctx, channelID, pages)
 	if err != nil {
 		_ = editReply(s, i, msg.DevCheckFailed(err.Error()))
 		return fmt.Errorf("check youtube channel %s: %w", channelID, err)
@@ -211,8 +221,26 @@ func devCheckText(checked int, streams []broadcast.Stream) string {
 	if len(streams) == 0 {
 		return msg.DevCheckNone(checked)
 	}
+
+	// Count each state for the header, and list live and upcoming streams first, since those are the ones worth looking at. The sort is stable, so streams keep YouTube's order within each state.
+	var upcoming, live, ended int
+	for _, st := range streams {
+		switch st.State {
+		case broadcast.Upcoming:
+			upcoming++
+		case broadcast.Live:
+			live++
+		default:
+			ended++
+		}
+	}
+	streams = slices.Clone(streams) // do not reorder the caller's slice
+	slices.SortStableFunc(streams, func(a, b broadcast.Stream) int {
+		return showRank(a.State) - showRank(b.State)
+	})
+
 	var b strings.Builder
-	b.WriteString(msg.DevCheckSummary(checked, len(streams)))
+	b.WriteString(msg.DevCheckSummary(checked, upcoming, live, ended))
 	for n, st := range streams {
 		if n == devCheckMaxLines {
 			b.WriteString("\n" + msg.DevCheckMore(len(streams)-n))
@@ -221,6 +249,18 @@ func devCheckText(checked int, streams []broadcast.Stream) string {
 		b.WriteString("\n" + msg.DevCheckLine(stateIcon(st.State), st.Title, st.StartAt))
 	}
 	return b.String()
+}
+
+// showRank is the order /devcheck lists states in: live, upcoming, ended.
+func showRank(s broadcast.State) int {
+	switch s {
+	case broadcast.Live:
+		return 0
+	case broadcast.Upcoming:
+		return 1
+	default:
+		return 2
+	}
 }
 
 func stateIcon(s broadcast.State) string {

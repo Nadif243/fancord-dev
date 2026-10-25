@@ -20,8 +20,11 @@ import (
 const (
 	defaultBaseURL = "https://www.googleapis.com/youtube/v3"
 
-	// How many of the channel's newest uploads to look at. Each of the two API calls costs 1 quota unit whether this is 5 or 50.
-	recentLimit = 30
+	// The most videos the API lists per call. A call costs 1 quota unit whether it returns 5 videos or 50, so we always ask for the most.
+	pageSize = 50
+
+	// MaxPages caps how deep one RecentStreams call may look (5 x 50 = 250 videos, at most 10 quota units).
+	MaxPages = 5
 )
 
 // A channel ID is "UC" followed by 22 letters, digits, "-" or "_".
@@ -41,58 +44,85 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-// RecentStreams looks at the channel's newest uploads and returns the ones that are (or were, or will be) live streams or premieres, newest first.
+// RecentStreams looks at the channel's newest uploads, `pages` pages of 50 (1 to MaxPages), and returns the ones that are (or were, or will be) live streams or premieres, in the order YouTube lists them (newest first).
 // checked is how many uploads it looked at, which helps when debugging.
 //
-// It costs 2 quota units: one call for the list, one for the details.
-func (c *Client) RecentStreams(ctx context.Context, channelID string) (checked int, streams []broadcast.Stream, err error) {
+// Uploads include Shorts and clips, so 50 uploads is not 50 streams, and a stream older than the window is simply not seen. Each page costs 2 quota units: one call for the list, one for the details.
+func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int) (checked int, streams []broadcast.Stream, err error) {
 	if !channelIDPattern.MatchString(channelID) {
 		return 0, nil, errors.New("channel ID must start with UC and be 24 characters long")
 	}
+	pages = min(max(pages, 1), MaxPages)
+
 	// Every channel has an "uploads" playlist whose ID is the channel ID with the leading "UC" replaced by "UU".
 	playlistID := "UU" + channelID[2:]
 
-	// Call 1: the IDs of the newest videos.
-	var list playlistItemsResponse
-	err = c.get(ctx, "playlistItems", url.Values{
+	pageToken := ""
+	for page := 0; page < pages; page++ {
+		ids, next, err := c.uploadsPage(ctx, playlistID, pageToken)
+		if err != nil {
+			return 0, nil, err
+		}
+		if len(ids) > 0 {
+			found, err := c.streamsAmong(ctx, ids)
+			if err != nil {
+				return 0, nil, err
+			}
+			streams = append(streams, found...)
+			checked += len(ids)
+		}
+		if next == "" { // that was the last page
+			break
+		}
+		pageToken = next
+	}
+	return checked, streams, nil
+}
+
+// uploadsPage returns the video IDs on one page of the uploads playlist, and the token for the next page ("" when there is none).
+func (c *Client) uploadsPage(ctx context.Context, playlistID, pageToken string) (ids []string, next string, err error) {
+	q := url.Values{
 		"part":       {"contentDetails"},
 		"playlistId": {playlistID},
-		"maxResults": {strconv.Itoa(recentLimit)},
-	}, &list)
-	if err != nil {
-		return 0, nil, err
+		"maxResults": {strconv.Itoa(pageSize)},
 	}
-	ids := make([]string, 0, len(list.Items))
+	if pageToken != "" {
+		q.Set("pageToken", pageToken)
+	}
+	var list playlistItemsResponse
+	if err := c.get(ctx, "playlistItems", q, &list); err != nil {
+		return nil, "", err
+	}
 	for _, item := range list.Items {
 		ids = append(ids, item.ContentDetails.VideoID)
 	}
-	if len(ids) == 0 {
-		return 0, nil, nil
-	}
+	return ids, list.NextPageToken, nil
+}
 
-	// Call 2: details for all of them at once. Only streams carry liveStreamingDetails, which is how we tell them from ordinary uploads.
+// streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams, in the order of ids. Only streams carry liveStreamingDetails, which is how we tell them from ordinary uploads.
+func (c *Client) streamsAmong(ctx context.Context, ids []string) ([]broadcast.Stream, error) {
 	var details videosResponse
-	err = c.get(ctx, "videos", url.Values{
+	err := c.get(ctx, "videos", url.Values{
 		"part": {"snippet,liveStreamingDetails"},
 		"id":   {strings.Join(ids, ",")},
 	}, &details)
 	if err != nil {
-		return 0, nil, err
+		return nil, err
 	}
 	byID := make(map[string]video, len(details.Items))
 	for _, v := range details.Items {
 		byID[v.ID] = v
 	}
 
-	// Walk the playlist order (newest first); the second call may reorder.
-	for _, id := range ids {
+	var streams []broadcast.Stream
+	for _, id := range ids { // YouTube may reorder its answer, so walk our own order
 		if v, ok := byID[id]; ok {
 			if st, isStream := toStream(v); isStream {
 				streams = append(streams, st)
 			}
 		}
 	}
-	return len(ids), streams, nil
+	return streams, nil
 }
 
 // toStream turns YouTube's video record into our own Stream. The second result is false for ordinary uploads and for states we do not understand.
@@ -191,7 +221,8 @@ func apiError(endpoint string, status int, body []byte) error {
 // The shapes below are only the parts of YouTube's answers that we read. encoding/json ignores everything else.
 
 type playlistItemsResponse struct {
-	Items []struct {
+	NextPageToken string `json:"nextPageToken"`
+	Items         []struct {
 		ContentDetails struct {
 			VideoID string `json:"videoId"`
 		} `json:"contentDetails"`

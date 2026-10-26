@@ -58,10 +58,15 @@ func DevCheckNone(checked int) string {
 	return fmt.Sprintf("Dari %d video terbaru, tidak ada yang stream.", checked)
 }
 
-// DevCheckSummary shows the totals, so a count can be compared with YouTube's own Live tab at a glance.
-func DevCheckSummary(checked, upcoming, live, ended int) string {
-	return fmt.Sprintf("Dari %d video terbaru, %d adalah stream (⏰ %d · 🔴 %d · ⚫ %d):",
-		checked, upcoming+live+ended, upcoming, live, ended)
+// DevCheckSummary shows the totals, so a count can be compared with YouTube's own Live tab at a glance. Premieres are counted apart.
+func DevCheckSummary(checked, upcoming, live, ended, premieres int) string {
+	return fmt.Sprintf("Dari %d video terbaru: %d stream (⏰ %d · 🔴 %d · ⚫ %d), %d premiere:",
+		checked, upcoming+live+ended, upcoming, live, ended, premieres)
+}
+
+// DevCheckNote is a warning from the scan, shown under the list.
+func DevCheckNote(note string) string {
+	return "⚠️ " + note
 }
 
 // DevCheckLine is one stream in the /devcheck answer. icon says its state.

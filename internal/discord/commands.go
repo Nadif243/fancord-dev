@@ -17,14 +17,12 @@ import (
 // handler runs one slash command. Returning an error only logs it; the user already got whatever the handler managed to reply.
 type handler func(s *discordgo.Session, i *discordgo.InteractionCreate) error
 
-// StreamSource is anything that can list a channel's recent streams.
-// *youtube.Client satisfies it without knowing this interface exists.
+// StreamSource is anything that can list a channel's recent streams. *youtube.Client satisfies it without knowing this interface exists.
 type StreamSource interface {
-	RecentStreams(ctx context.Context, channelID string, pages int) (checked int, streams []broadcast.Stream, err error)
+	RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error)
 }
 
-// Deps is everything the commands need from the rest of the bot, gathered in
-// one struct so NewRouter does not grow a new parameter for every feature.
+// Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
 	Announcer        *broadcast.Announcer
 	DevChannelID     string       // the only channel where dev-only commands work
@@ -193,12 +191,12 @@ func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCr
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	checked, streams, err := r.deps.Source.RecentStreams(ctx, channelID, pages)
+	scan, err := r.deps.Source.RecentStreams(ctx, channelID, pages)
 	if err != nil {
 		_ = editReply(s, i, msg.DevCheckFailed(err.Error()))
 		return fmt.Errorf("check youtube channel %s: %w", channelID, err)
 	}
-	return editReply(s, i, devCheckText(checked, streams))
+	return editReply(s, i, devCheckText(scan))
 }
 
 // deferReply shows "the bot is thinking..." and gives us 15 minutes to answer.
@@ -214,60 +212,73 @@ func editReply(s *discordgo.Session, i *discordgo.InteractionCreate, content str
 	return err
 }
 
-// A Discord message holds at most 2000 characters, so only the newest streams are listed.
+// A Discord message holds at most 2000 characters, so only the first lines of the list are shown.
 const devCheckMaxLines = 10
 
-func devCheckText(checked int, streams []broadcast.Stream) string {
-	if len(streams) == 0 {
-		return msg.DevCheckNone(checked)
+func devCheckText(scan broadcast.Scan) string {
+	if len(scan.Streams) == 0 {
+		return withNotes(msg.DevCheckNone(scan.Checked), scan.Notes)
 	}
 
-	// Count each state for the header, and list live and upcoming streams first, since those are the ones worth looking at. The sort is stable, so streams keep YouTube's order within each state.
-	var upcoming, live, ended int
-	for _, st := range streams {
-		switch st.State {
-		case broadcast.Upcoming:
+	// Count for the header, and put the interesting ones first: live, then upcoming, then premieres, then ended streams. The sort is stable, so YouTube's order (newest first) is kept within each group.
+	var upcoming, live, ended, premieres int
+	for _, st := range scan.Streams {
+		switch {
+		case st.Kind == broadcast.KindPremiere:
+			premieres++
+		case st.State == broadcast.Upcoming:
 			upcoming++
-		case broadcast.Live:
+		case st.State == broadcast.Live:
 			live++
 		default:
 			ended++
 		}
 	}
-	streams = slices.Clone(streams) // do not reorder the caller's slice
+	streams := slices.Clone(scan.Streams) // do not reorder the caller's slice
 	slices.SortStableFunc(streams, func(a, b broadcast.Stream) int {
-		return showRank(a.State) - showRank(b.State)
+		return showRank(a) - showRank(b)
 	})
 
 	var b strings.Builder
-	b.WriteString(msg.DevCheckSummary(checked, upcoming, live, ended))
+	b.WriteString(msg.DevCheckSummary(scan.Checked, upcoming, live, ended, premieres))
 	for n, st := range streams {
 		if n == devCheckMaxLines {
 			b.WriteString("\n" + msg.DevCheckMore(len(streams)-n))
 			break
 		}
-		b.WriteString("\n" + msg.DevCheckLine(stateIcon(st.State), st.Title, st.StartAt))
+		b.WriteString("\n" + msg.DevCheckLine(icon(st), st.Title, st.StartAt))
 	}
-	return b.String()
+	return withNotes(b.String(), scan.Notes)
 }
 
-// showRank is the order /devcheck lists states in: live, upcoming, ended.
-func showRank(s broadcast.State) int {
-	switch s {
-	case broadcast.Live:
+func withNotes(text string, notes []string) string {
+	for _, note := range notes {
+		text += "\n" + msg.DevCheckNote(note)
+	}
+	return text
+}
+
+// showRank is the order /devcheck lists things in.
+func showRank(st broadcast.Stream) int {
+	switch {
+	case st.Kind == broadcast.KindPremiere:
+		return 2
+	case st.State == broadcast.Live:
 		return 0
-	case broadcast.Upcoming:
+	case st.State == broadcast.Upcoming:
 		return 1
 	default:
-		return 2
+		return 3
 	}
 }
 
-func stateIcon(s broadcast.State) string {
-	switch s {
-	case broadcast.Upcoming:
+func icon(st broadcast.Stream) string {
+	switch {
+	case st.Kind == broadcast.KindPremiere:
+		return "🎬"
+	case st.State == broadcast.Upcoming:
 		return "⏰"
-	case broadcast.Live:
+	case st.State == broadcast.Live:
 		return "🔴"
 	default:
 		return "⚫"

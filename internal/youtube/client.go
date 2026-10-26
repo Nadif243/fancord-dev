@@ -23,12 +23,15 @@ const (
 	// The most videos the API lists per call. A call costs 1 quota unit whether it returns 5 videos or 50, so we always ask for the most.
 	pageSize = 50
 
-	// MaxPages caps how deep one RecentStreams call may look (5 x 50 = 250 videos, at most 10 quota units).
+	// MaxPages caps how deep one RecentStreams call may look (5 x 50 = 250 videos).
 	MaxPages = 5
 )
 
 // A channel ID is "UC" followed by 22 letters, digits, "-" or "_".
 var channelIDPattern = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
+
+// YouTube writes lengths like PT1H2M3S (1h 2m 3s), PT45S, or P0D (nothing).
+var isoDuration = regexp.MustCompile(`^P(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?$`)
 
 type Client struct {
 	apiKey  string
@@ -44,43 +47,86 @@ func NewClient(apiKey string) *Client {
 	}
 }
 
-// RecentStreams looks at the channel's newest uploads, `pages` pages of 50 (1 to MaxPages), and returns the ones that are (or were, or will be) live streams or premieres, in the order YouTube lists them (newest first).
-// checked is how many uploads it looked at, which helps when debugging.
+// RecentStreams looks at the channel's newest uploads, `pages` pages of 50 (1 to MaxPages), and returns the live streams and premieres among them in the order YouTube lists them (newest first). Each one's Kind says which.
 //
-// Uploads include Shorts and clips, so 50 uploads is not 50 streams, and a stream older than the window is simply not seen. Each page costs 2 quota units: one call for the list, one for the details.
-func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int) (checked int, streams []broadcast.Stream, err error) {
+// Uploads include Shorts and clips, so 50 uploads is not 50 streams, and a stream older than the window is simply not seen.
+//
+// Telling streams from premieres: YouTube describes both the same way, but every channel also has a hidden playlist that is exactly its Live tab (premieres are not on it). See kindOf for how the two are told apart.
+//
+// Cost per page: 1 unit for the uploads list, 1 for the details, and 1 for the Live tab list.
+func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
 	if !channelIDPattern.MatchString(channelID) {
-		return 0, nil, errors.New("channel ID must start with UC and be 24 characters long")
+		return broadcast.Scan{}, errors.New("channel ID must start with UC and be 24 characters long")
 	}
 	pages = min(max(pages, 1), MaxPages)
 
-	// Every channel has an "uploads" playlist whose ID is the channel ID with the leading "UC" replaced by "UU".
-	playlistID := "UU" + channelID[2:]
+	// Every channel has playlists whose IDs are the channel ID with the leading "UC" replaced: "UU" = all uploads, "UULV" = the Live tab.
+	rest := channelID[2:]
+	liveTab, err := c.videoIDs(ctx, "UULV"+rest, pages)
+	if err != nil {
+		return broadcast.Scan{}, err
+	}
 
+	var scan broadcast.Scan
 	pageToken := ""
 	for page := 0; page < pages; page++ {
-		ids, next, err := c.uploadsPage(ctx, playlistID, pageToken)
+		ids, next, err := c.playlistPage(ctx, "UU"+rest, pageToken)
 		if err != nil {
-			return 0, nil, err
+			return broadcast.Scan{}, err
 		}
 		if len(ids) > 0 {
-			found, err := c.streamsAmong(ctx, ids)
+			found, err := c.streamsAmong(ctx, ids, liveTab)
 			if err != nil {
-				return 0, nil, err
+				return broadcast.Scan{}, err
 			}
-			streams = append(streams, found...)
-			checked += len(ids)
+			scan.Streams = append(scan.Streams, found...)
+			scan.Checked += len(ids)
 		}
 		if next == "" { // that was the last page
 			break
 		}
 		pageToken = next
 	}
-	return checked, streams, nil
+
+	if len(liveTab) == 0 {
+		for _, st := range scan.Streams {
+			if st.State == broadcast.Ended {
+				scan.Notes = append(scan.Notes,
+					"The Live tab list could not be read, so premieres cannot be told apart from streams that already ended.")
+				break
+			}
+		}
+	}
+	return scan, nil
 }
 
-// uploadsPage returns the video IDs on one page of the uploads playlist, and the token for the next page ("" when there is none).
-func (c *Client) uploadsPage(ctx context.Context, playlistID, pageToken string) (ids []string, next string, err error) {
+// videoIDs collects the video IDs on up to `pages` pages of a playlist. A playlist that does not exist (for example a channel that never streamed) is an empty result, not an error.
+func (c *Client) videoIDs(ctx context.Context, playlistID string, pages int) (map[string]bool, error) {
+	set := map[string]bool{}
+	pageToken := ""
+	for page := 0; page < pages; page++ {
+		ids, next, err := c.playlistPage(ctx, playlistID, pageToken)
+		if err != nil {
+			var se *statusError
+			if errors.As(err, &se) && se.status == http.StatusNotFound {
+				return set, nil
+			}
+			return nil, err
+		}
+		for _, id := range ids {
+			set[id] = true
+		}
+		if next == "" {
+			break
+		}
+		pageToken = next
+	}
+	return set, nil
+}
+
+// playlistPage returns the video IDs on one page of a playlist, and the
+// token for the next page ("" when there is none).
+func (c *Client) playlistPage(ctx context.Context, playlistID, pageToken string) (ids []string, next string, err error) {
 	q := url.Values{
 		"part":       {"contentDetails"},
 		"playlistId": {playlistID},
@@ -99,11 +145,11 @@ func (c *Client) uploadsPage(ctx context.Context, playlistID, pageToken string) 
 	return ids, list.NextPageToken, nil
 }
 
-// streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams, in the order of ids. Only streams carry liveStreamingDetails, which is how we tell them from ordinary uploads.
-func (c *Client) streamsAmong(ctx context.Context, ids []string) ([]broadcast.Stream, error) {
+// streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids. Only those carry liveStreamingDetails, which is how we tell them from ordinary uploads.
+func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool) ([]broadcast.Stream, error) {
 	var details videosResponse
 	err := c.get(ctx, "videos", url.Values{
-		"part": {"snippet,liveStreamingDetails"},
+		"part": {"snippet,liveStreamingDetails,contentDetails"},
 		"id":   {strings.Join(ids, ",")},
 	}, &details)
 	if err != nil {
@@ -117,7 +163,7 @@ func (c *Client) streamsAmong(ctx context.Context, ids []string) ([]broadcast.St
 	var streams []broadcast.Stream
 	for _, id := range ids { // YouTube may reorder its answer, so walk our own order
 		if v, ok := byID[id]; ok {
-			if st, isStream := toStream(v); isStream {
+			if st, isStream := toStream(v, liveTab); isStream {
 				streams = append(streams, st)
 			}
 		}
@@ -126,7 +172,7 @@ func (c *Client) streamsAmong(ctx context.Context, ids []string) ([]broadcast.St
 }
 
 // toStream turns YouTube's video record into our own Stream. The second result is false for ordinary uploads and for states we do not understand.
-func toStream(v video) (broadcast.Stream, bool) {
+func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
 	d := v.LiveStreamingDetails
 	if d == nil {
 		return broadcast.Stream{}, false
@@ -146,7 +192,49 @@ func toStream(v video) (broadcast.Stream, bool) {
 	default:
 		return broadcast.Stream{}, false
 	}
+	st.Kind = kindOf(st.State, v.ID, v.ContentDetails.Duration, liveTab)
 	return st, true
+}
+
+// kindOf decides stream or premiere, using two clues.
+//
+//  1. On the Live tab list: a stream. (Premieres are listed under Videos.)
+//  2. Otherwise it depends on the state:
+//     - Upcoming or live: a stream has no length yet ("P0D"), but a premiere
+//     is a finished video and already has one.
+//     - Ended: not on the Live tab, so a premiere. If we could not read the
+//     Live tab at all, we cannot tell and call it a stream, as before.
+//
+// Weak spot: a stream that ended a minute ago may not be on the Live tab list yet. The poller will therefore remember what it decided while the stream was still live, instead of asking again.
+func kindOf(state broadcast.State, id, duration string, liveTab map[string]bool) broadcast.Kind {
+	if liveTab[id] {
+		return broadcast.KindStream
+	}
+	switch state {
+	case broadcast.Upcoming, broadcast.Live:
+		if length, ok := parseDuration(duration); ok && length > 0 {
+			return broadcast.KindPremiere
+		}
+		return broadcast.KindStream
+	default:
+		if len(liveTab) == 0 {
+			return broadcast.KindStream
+		}
+		return broadcast.KindPremiere
+	}
+}
+
+// parseDuration reads YouTube's ISO 8601 lengths such as "PT1H2M3S".
+func parseDuration(s string) (time.Duration, bool) {
+	m := isoDuration.FindStringSubmatch(s)
+	if m == nil || s == "P" {
+		return 0, false
+	}
+	n := func(i int) time.Duration {
+		v, _ := strconv.Atoi(m[i]) // empty (a missing part) reads as 0
+		return time.Duration(v)
+	}
+	return n(1)*24*time.Hour + n(2)*time.Hour + n(3)*time.Minute + n(4)*time.Second, true
 }
 
 // firstTime returns the first value that parses as a time, else the zero time.
@@ -177,7 +265,7 @@ func (c *Client) get(ctx context.Context, endpoint string, q url.Values, out any
 		return fmt.Errorf("youtube %s: read response: %w", endpoint, err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return apiError(endpoint, resp.StatusCode, body)
+		return newStatusError(endpoint, resp.StatusCode, body)
 	}
 	if err := json.Unmarshal(body, out); err != nil {
 		return fmt.Errorf("youtube %s: unreadable response: %w", endpoint, err)
@@ -194,8 +282,31 @@ func withoutURL(err error) error {
 	return err
 }
 
+// statusError is YouTube answering with an error status. It is its own type so callers can look at the status (see videoIDs).
+type statusError struct {
+	endpoint string
+	status   int
+	reason   string // YouTube's short code, such as "quotaExceeded"
+	message  string
+}
+
 // apiError turns an error answer from YouTube into a short readable error.
-func apiError(endpoint string, status int, body []byte) error {
+func (e *statusError) Error() string {
+	if e.message == "" {
+		return fmt.Sprintf("youtube %s: HTTP %d", e.endpoint, e.status)
+	}
+	reason := ""
+	if e.reason != "" {
+		reason = " (" + e.reason + ")"
+	}
+	text := e.message
+	if r := []rune(text); len(r) > 200 {
+		text = string(r[:200]) + "…"
+	}
+	return fmt.Sprintf("youtube %s: HTTP %d%s: %s", e.endpoint, e.status, reason, text)
+}
+
+func newStatusError(endpoint string, status int, body []byte) error {
 	var e struct {
 		Error struct {
 			Message string `json:"message"`
@@ -204,18 +315,14 @@ func apiError(endpoint string, status int, body []byte) error {
 			} `json:"errors"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(body, &e) != nil || e.Error.Message == "" {
-		return fmt.Errorf("youtube %s: HTTP %d", endpoint, status)
+	se := &statusError{endpoint: endpoint, status: status}
+	if json.Unmarshal(body, &e) == nil {
+		se.message = e.Error.Message
+		if len(e.Error.Errors) > 0 {
+			se.reason = e.Error.Errors[0].Reason
+		}
 	}
-	reason := ""
-	if len(e.Error.Errors) > 0 {
-		reason = " (" + e.Error.Errors[0].Reason + ")"
-	}
-	text := e.Error.Message
-	if r := []rune(text); len(r) > 200 {
-		text = string(r[:200]) + "…"
-	}
-	return fmt.Errorf("youtube %s: HTTP %d%s: %s", endpoint, status, reason, text)
+	return se
 }
 
 // The shapes below are only the parts of YouTube's answers that we read. encoding/json ignores everything else.
@@ -240,6 +347,9 @@ type video struct {
 		// "upcoming", "live" or "none"
 		LiveBroadcastContent string `json:"liveBroadcastContent"`
 	} `json:"snippet"`
+	ContentDetails struct {
+		Duration string `json:"duration"` // "P0D" while a stream has no length yet
+	} `json:"contentDetails"`
 	// A pointer, so a plain upload (no such field) is nil instead of empty.
 	LiveStreamingDetails *struct {
 		ScheduledStartTime string `json:"scheduledStartTime"`

@@ -60,10 +60,12 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("memory file ready", "path", cfg.DataFile)
-	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory)
+	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
+		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
 
 	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
-	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory())
+	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory()).
+		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource

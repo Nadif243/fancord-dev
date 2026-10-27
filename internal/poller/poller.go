@@ -28,6 +28,7 @@ type Source interface {
 // Announcer takes the latest known state of a stream. *broadcast.Announcer satisfies it.
 type Announcer interface {
 	Update(broadcast.Stream) error
+	Knows(videoID string) bool // is there already an announcement for it?
 }
 
 type Poller struct {
@@ -92,7 +93,7 @@ func (p *Poller) check(parent context.Context) {
 	// YouTube lists newest first. Going from the end announces the oldest first, so several new streams appear in the order they were made.
 	for i := len(scan.Streams) - 1; i >= 0; i-- {
 		st := scan.Streams[i]
-		if !worthAnnouncing(st, now) {
+		if !worthAnnouncing(st, now, p.announcer.Knows(st.VideoID)) {
 			continue
 		}
 		passed++
@@ -111,8 +112,13 @@ func (p *Poller) check(parent context.Context) {
 }
 
 // worthAnnouncing is the bot's policy on what counts. (Whether a stream that is already over gets a message is the announcer's decision, not ours.)
-func worthAnnouncing(st broadcast.Stream, now time.Time) bool {
-	if st.Kind == broadcast.KindPremiere {
+//
+// known says the stream already has an announcement. Then it was judged to be
+// a stream while it was still upcoming or live, which is more reliable than
+// the guess made once it is over (a stream that just ended may not be on the
+// Live tab list yet, and would look like a premiere). So it keeps being updated.
+func worthAnnouncing(st broadcast.Stream, now time.Time, known bool) bool {
+	if st.Kind == broadcast.KindPremiere && !known {
 		return false // a video release, not a stream
 	}
 	if st.State == broadcast.Upcoming && !st.StartAt.IsZero() {

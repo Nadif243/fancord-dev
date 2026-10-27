@@ -40,12 +40,19 @@ type YouTube struct {
 	PollEvery time.Duration // how often the poller checks it
 }
 
+// Pings are the roles the bot mentions. Both are optional: no role set, no ping.
+type Pings struct {
+	Upcoming string // a new waiting room appeared
+	Live     string // a stream went live
+}
+
 type Config struct {
 	DataFile       string // where the bot remembers what it announced
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
 	Channels       Channels
+	Pings          Pings
 	YouTube        YouTube
 	HeartbeatEvery time.Duration
 }
@@ -89,6 +96,8 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Ops = optionalID("CHANNEL_OPS", c.Channels.Test)
 	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
 	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
+	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
+	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 
 	// The key is never repeated in an error message, whatever is wrong with it.
 	c.YouTube.APIKey = get("YOUTUBE_API_KEY")

@@ -44,6 +44,19 @@ func StreamEnded(title, url string) string {
 	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", title, url)
 }
 
+// PingUpcoming is the separate message that mentions the "new waiting room" role. The link is in <angle brackets> so Discord does not show a second preview; the announcement itself already has one.
+func PingUpcoming(roleID, title, url string, start time.Time) string {
+	if start.IsZero() {
+		return fmt.Sprintf("⏰ <@&%s> **Jadwal stream baru**: %s\n<%s>", roleID, title, url)
+	}
+	return fmt.Sprintf("⏰ <@&%s> **Jadwal stream baru**: %s\nMulai %s (%s)\n<%s>", roleID, title, stampFull(start), stamp(start), url)
+}
+
+// PingLive is the separate message that mentions the "live now" role.
+func PingLive(roleID, title, url string) string {
+	return fmt.Sprintf("🔴 <@&%s> **Sedang live!** %s\n<%s>", roleID, title, url)
+}
+
 // DevStreamSet is the reply to /devstream.
 func DevStreamSet(state string) string {
 	return fmt.Sprintf("Stream dev sekarang: %s", state)

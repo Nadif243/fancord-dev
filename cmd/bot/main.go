@@ -18,6 +18,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
+	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/ops"
 	"github.com/Nadif243/fancord-bot/internal/poller"
 	"github.com/Nadif243/fancord-bot/internal/store"
@@ -60,6 +61,11 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("memory file ready", "path", cfg.DataFile)
+	streams, err := history.Open(cfg.HistoryFile)
+	if err != nil {
+		return err
+	}
+	log.Info("history file ready", "path", cfg.HistoryFile)
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
 		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
 
@@ -119,7 +125,7 @@ func run(log *slog.Logger) error {
 	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)
 
 	if source != nil && cfg.YouTube.ChannelID != "" {
-		start(poller.New(source, announcer, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).Run)
+		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
 	}

@@ -28,6 +28,7 @@ type Stream struct {
 	State   State
 	Kind    Kind      // 0 (unset) is treated as a stream
 	StartAt time.Time // scheduled start; the zero value means "not known"
+	EndAt   time.Time // when it ended; the zero value means "not over, or not known"
 }
 
 // URL is the watch link. Discord shows a video preview for it by itself.

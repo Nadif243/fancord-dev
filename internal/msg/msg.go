@@ -6,8 +6,26 @@ package msg
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
+
+// markdownChars are the characters Discord reads as formatting, plus the ones that start a mention or a link. A backslash in front of any of them makes Discord show the character itself.
+const markdownChars = "\\*_~|`<>[]@"
+
+// escape makes text from outside (a YouTube title, say) safe to put inside a message: shown exactly as written, never as formatting. Without it, a title such as "Part 1 || Part 2 || Part 3" would turn into a hidden spoiler.
+// Every title that goes into a message must pass through here, so any text that includes one is built in this file.
+func escape(s string) string {
+	s = strings.Join(strings.Fields(s), " ") // one line, single spaces
+	var b strings.Builder
+	for _, r := range s {
+		if strings.ContainsRune(markdownChars, r) {
+			b.WriteByte('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
 
 // ---- Fan-facing (Indonesian) -------------------------------------------
 
@@ -30,6 +48,7 @@ const (
 
 // StreamUpcoming announces a scheduled stream. The start time is shown twice: as a full date and as "in 2 hours", both rendered by Discord for each viewer.
 func StreamUpcoming(title, url string, start time.Time) string {
+	title = escape(title)
 	if start.IsZero() {
 		return fmt.Sprintf("⏰ **Jadwal stream**: %s\n%s", title, url)
 	}
@@ -37,15 +56,16 @@ func StreamUpcoming(title, url string, start time.Time) string {
 }
 
 func StreamLive(title, url string) string {
-	return fmt.Sprintf("🔴 **Sedang live!** %s\n%s", title, url)
+	return fmt.Sprintf("🔴 **Sedang live!** %s\n%s", escape(title), url)
 }
 
 func StreamEnded(title, url string) string {
-	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", title, url)
+	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", escape(title), url)
 }
 
 // PingUpcoming is the separate message that mentions the "new waiting room" role. The link is in <angle brackets> so Discord does not show a second preview; the announcement itself already has one.
 func PingUpcoming(roleID, title, url string, start time.Time) string {
+	title = escape(title)
 	if start.IsZero() {
 		return fmt.Sprintf("⏰ <@&%s> **Jadwal stream baru**: %s\n<%s>", roleID, title, url)
 	}
@@ -54,7 +74,7 @@ func PingUpcoming(roleID, title, url string, start time.Time) string {
 
 // PingLive is the separate message that mentions the "live now" role.
 func PingLive(roleID, title, url string) string {
-	return fmt.Sprintf("🔴 <@&%s> **Sedang live!** %s\n<%s>", roleID, title, url)
+	return fmt.Sprintf("🔴 <@&%s> **Sedang live!** %s\n<%s>", roleID, escape(title), url)
 }
 
 // DevStreamSet is the reply to /devstream.
@@ -84,7 +104,7 @@ func DevCheckNote(note string) string {
 
 // DevCheckLine is one stream in the /devcheck answer. icon says its state.
 func DevCheckLine(icon, title string, start time.Time) string {
-	title = shorten(title, 60)
+	title = escape(shorten(title, 60)) // cut first, so an escape is never cut in half
 	if start.IsZero() {
 		return fmt.Sprintf("%s %s", icon, title)
 	}

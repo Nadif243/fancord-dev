@@ -25,6 +25,11 @@ type Source interface {
 	RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error)
 }
 
+// Recorder keeps a history of the streams seen. *history.File satisfies it.
+type Recorder interface {
+	Record(broadcast.Stream) error
+}
+
 // Announcer takes the latest known state of a stream. *broadcast.Announcer satisfies it.
 type Announcer interface {
 	Update(broadcast.Stream) error
@@ -34,6 +39,7 @@ type Announcer interface {
 type Poller struct {
 	source    Source
 	announcer Announcer
+	recorder  Recorder
 	channelID string
 	every     time.Duration
 	log       *slog.Logger
@@ -44,9 +50,9 @@ type Poller struct {
 	warned  map[string]bool // notes already logged, so they are not repeated every time
 }
 
-func New(source Source, announcer Announcer, channelID string, every time.Duration, log *slog.Logger) *Poller {
+func New(source Source, announcer Announcer, recorder Recorder, channelID string, every time.Duration, log *slog.Logger) *Poller {
 	return &Poller{
-		source: source, announcer: announcer, channelID: channelID,
+		source: source, announcer: announcer, recorder: recorder, channelID: channelID,
 		every: every, log: log, now: time.Now,
 		warned: map[string]bool{},
 	}
@@ -97,6 +103,9 @@ func (p *Poller) check(parent context.Context) {
 			continue
 		}
 		passed++
+		if err := p.recorder.Record(st); err != nil {
+			p.log.Warn("saving to the history failed, will try again", "video", st.VideoID, "err", err)
+		}
 		if err := p.announcer.Update(st); err != nil {
 			p.log.Warn("announcing failed, will try again", "video", st.VideoID, "err", err)
 		}

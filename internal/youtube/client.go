@@ -192,6 +192,7 @@ func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
 	default:
 		return broadcast.Stream{}, false
 	}
+	st.EndAt = firstTime(d.ActualEndTime)
 	st.Kind = kindOf(st.State, v.ID, v.ContentDetails.Duration, liveTab)
 	return st, true
 }

@@ -18,6 +18,9 @@ var snowflake = regexp.MustCompile(`^\d{17,20}$`)
 var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 
 const (
+	defaultDataFile         = "data/state.json"
+	defaultPollSeconds      = 120
+	minPollSeconds          = 30
 	defaultHeartbeatSeconds = 60
 	minHeartbeatSeconds     = 15
 )
@@ -32,11 +35,13 @@ type Channels struct {
 
 // YouTube holds the settings for reading her channel. Both are optional, so the bot still starts without them; the commands that need them say so.
 type YouTube struct {
-	APIKey    string // secret
-	ChannelID string // her channel, starts with UC
+	APIKey    string        // secret
+	ChannelID string        // her channel, starts with UC
+	PollEvery time.Duration // how often the poller checks it
 }
 
 type Config struct {
+	DataFile       string // where the bot remembers what it announced
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
@@ -92,6 +97,22 @@ func Load(getenv func(string) string) (Config, error) {
 			problems = append(problems, "YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got "+quote(v))
 		}
 		c.YouTube.ChannelID = v
+	}
+
+	pollSecs := defaultPollSeconds
+	if v := get("YOUTUBE_POLL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minPollSeconds {
+			problems = append(problems, "YOUTUBE_POLL_SECONDS must be a whole number of "+strconv.Itoa(minPollSeconds)+" or more, got "+quote(v))
+		} else {
+			pollSecs = n
+		}
+	}
+	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
+
+	c.DataFile = get("DATA_FILE")
+	if c.DataFile == "" {
+		c.DataFile = defaultDataFile
 	}
 
 	secs := defaultHeartbeatSeconds

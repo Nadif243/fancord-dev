@@ -1,3 +1,6 @@
+# memory files
+data/
+
 # secrets and local state
 .env
 *.db

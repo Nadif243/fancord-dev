@@ -24,10 +24,10 @@ type StreamSource interface {
 
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
-	Announcer        *broadcast.Announcer
-	DevChannelID     string       // the only channel where dev-only commands work
-	Source           StreamSource // nil when no YouTube key is configured
-	YouTubeChannelID string       // her channel, the default for /devcheck
+	DevAnnouncer     *broadcast.Announcer // for /devstream only: it posts fake streams and forgets them
+	DevChannelID     string               // the only channel where dev-only commands work
+	Source           StreamSource         // nil when no YouTube key is configured
+	YouTubeChannelID string               // her channel, the default for /devcheck
 }
 
 // Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
@@ -154,7 +154,7 @@ func (r *Router) handleDevStream(s *discordgo.Session, i *discordgo.InteractionC
 		return reply(s, i, msg.UnknownCommand)
 	}
 
-	if err := r.deps.Announcer.Update(st); err != nil {
+	if err := r.deps.DevAnnouncer.Update(st); err != nil {
 		_ = reply(s, i, msg.CommandFailed)
 		return fmt.Errorf("announce dev stream: %w", err)
 	}

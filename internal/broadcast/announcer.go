@@ -1,6 +1,7 @@
 package broadcast
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/Nadif243/fancord-bot/internal/msg"
@@ -12,25 +13,32 @@ type Messenger interface {
 	Edit(channelID, messageID, content string) error
 }
 
-// announced remembers what we already posted for one video.
-type announced struct {
-	messageID string
-	state     State
-	text      string
+// Announced is what we remember about the message posted for one stream.
+type Announced struct {
+	MessageID string
+	State     State
+	Text      string
+}
+
+// Memory is where the announcer keeps what it has posted. It is an interface so the real bot can use a file (package store) and tests a fake.
+type Memory interface {
+	Get(videoID string) (Announced, bool)
+
+	// Put remembers a record. It must be remembered for the rest of this run even when the returned error says it could not be saved to disk.
+	Put(videoID string, a Announced) error
 }
 
 // Announcer posts ONE message per stream and edits that same message as the stream moves from upcoming to live to ended.
-// It only remembers in memory, so after a restart it forgets what it posted (saving this in a database comes later).
 type Announcer struct {
 	m         Messenger
 	channelID string
+	mem       Memory
 
-	mu     sync.Mutex           // Discord runs each command in its own goroutine, so the map needs a lock
-	posted map[string]announced // by video ID
+	mu sync.Mutex // Discord runs each command in its own goroutine; one Update at a time
 }
 
-func NewAnnouncer(m Messenger, channelID string) *Announcer {
-	return &Announcer{m: m, channelID: channelID, posted: map[string]announced{}}
+func NewAnnouncer(m Messenger, channelID string, mem Memory) *Announcer {
+	return &Announcer{m: m, channelID: channelID, mem: mem}
 }
 
 // Update is the only method sources call. It can be called as often as you like with the latest known state: it posts, edits or does nothing, so one stream never produces two messages however many signals report it.
@@ -39,7 +47,7 @@ func (a *Announcer) Update(s Stream) error {
 	defer a.mu.Unlock() // note: the lock is held during the Discord call, fine at this size
 
 	text := textFor(s)
-	prev, seen := a.posted[s.VideoID]
+	prev, seen := a.mem.Get(s.VideoID)
 
 	switch {
 	case !seen && s.State == Ended:
@@ -48,24 +56,31 @@ func (a *Announcer) Update(s Stream) error {
 	case !seen:
 		id, err := a.m.Send(a.channelID, text)
 		if err != nil {
-			return err // not recorded, so the next Update tries again
+			return err // not remembered, so the next Update tries again
 		}
-		a.posted[s.VideoID] = announced{messageID: id, state: s.State, text: text}
-		return nil
+		return a.remember(s, id, text)
 
-	case s.State < prev.state:
+	case s.State < prev.State:
 		return nil // stale information: streams only move forward
 
-	case text == prev.text:
+	case text == prev.Text:
 		return nil // nothing changed, so do not touch Discord
 
 	default:
-		if err := a.m.Edit(a.channelID, prev.messageID, text); err != nil {
+		if err := a.m.Edit(a.channelID, prev.MessageID, text); err != nil {
 			return err
 		}
-		a.posted[s.VideoID] = announced{messageID: prev.messageID, state: s.State, text: text}
-		return nil
+		return a.remember(s, prev.MessageID, text)
 	}
+}
+
+// remember records what is now on Discord. If saving fails the message is still posted, so the error says so.
+func (a *Announcer) remember(s Stream, messageID, text string) error {
+	rec := Announced{MessageID: messageID, State: s.State, Text: text}
+	if err := a.mem.Put(s.VideoID, rec); err != nil {
+		return fmt.Errorf("announced %s but could not save it: %w", s.VideoID, err)
+	}
+	return nil
 }
 
 func textFor(s Stream) string {

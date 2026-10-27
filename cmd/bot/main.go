@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 
 	"github.com/bwmarrin/discordgo"
@@ -18,6 +19,8 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/ops"
+	"github.com/Nadif243/fancord-bot/internal/poller"
+	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
@@ -51,7 +54,16 @@ func run(log *slog.Logger) error {
 	s.Identify.Intents = discordgo.IntentsGuilds // no privileged intents needed yet
 
 	messenger := discord.SessionMessenger{S: s}
-	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce)
+
+	memory, err := store.Open(cfg.DataFile)
+	if err != nil {
+		return err
+	}
+	log.Info("memory file ready", "path", cfg.DataFile)
+	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory)
+
+	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
+	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory())
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource
@@ -60,7 +72,7 @@ func run(log *slog.Logger) error {
 	}
 
 	router := discord.NewRouter(log, discord.Deps{
-		Announcer:        announcer,
+		DevAnnouncer:     devAnnouncer,
 		DevChannelID:     cfg.Channels.Test,
 		Source:           source,
 		YouTubeChannelID: cfg.YouTube.ChannelID,
@@ -92,16 +104,27 @@ func run(log *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	hb := ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log)
-	hbDone := make(chan struct{})
-	go func() {
-		hb.Run(ctx)
-		close(hbDone)
-	}()
+	// Everything that runs in the background goes through start, so shutdown can wait for all of it with one wg.Wait().
+	var wg sync.WaitGroup
+	start := func(run func(context.Context)) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			run(ctx)
+		}()
+	}
+
+	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)
+
+	if source != nil && cfg.YouTube.ChannelID != "" {
+		start(poller.New(source, announcer, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).Run)
+	} else {
+		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
+	}
 
 	log.Info("bot is running; press Ctrl+C to stop", "version", version)
 	<-ctx.Done()
 	log.Info("shutting down")
-	<-hbDone // let the heartbeat mark itself Offline before the connection closes
+	wg.Wait() // let the heartbeat mark itself Offline before the connection closes
 	return nil
 }

@@ -32,6 +32,7 @@ type Channels struct {
 	Ops      string // heartbeat and alerts
 	Announce string // stream and tweet announcements
 	Approval string // mod approval queue
+	Recap    string // the weekly recap; the announcement channel when not set
 }
 
 // YouTube holds the settings for reading her channel. Both are optional, so the bot still starts without them; the commands that need them say so.
@@ -98,6 +99,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Ops = optionalID("CHANNEL_OPS", c.Channels.Test)
 	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
 	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
+	c.Channels.Recap = optionalID("CHANNEL_RECAP", c.Channels.Announce)
 	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 

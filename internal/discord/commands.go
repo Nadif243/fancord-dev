@@ -22,12 +22,19 @@ type StreamSource interface {
 	RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error)
 }
 
+// RecapPreviewer posts the recap of a past week into a channel.
+// *recap.Service satisfies it.
+type RecapPreviewer interface {
+	Preview(channelID string, weeksAgo int) error
+}
+
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
 	DevAnnouncer     *broadcast.Announcer // for /devstream only: it posts fake streams and forgets them
 	DevChannelID     string               // the only channel where dev-only commands work
 	Source           StreamSource         // nil when no YouTube key is configured
 	YouTubeChannelID string               // her channel, the default for /devcheck
+	Recap            RecapPreviewer       // nil when the recap is off
 }
 
 // Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
@@ -76,6 +83,18 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 			Required:    false,
 		}},
 	}, r.handleDevCheck)
+
+	// /devrecap posts a past week's recap here, so the layout can be judged without waiting for Sunday.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "devrecap",
+		Description: msg.DevRecapDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:        discordgo.ApplicationCommandOptionInteger,
+			Name:        "weeks",
+			Description: msg.DevRecapWeeksDescription,
+			Required:    false,
+		}},
+	}, r.handleDevRecap)
 
 	return r
 }
@@ -197,6 +216,31 @@ func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCr
 		return fmt.Errorf("check youtube channel %s: %w", channelID, err)
 	}
 	return editReply(s, i, devCheckText(scan))
+}
+
+// handleDevRecap posts the recap of the chosen week into this channel.
+func (r *Router) handleDevRecap(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.ChannelID != r.deps.DevChannelID {
+		return reply(s, i, msg.DevOnly)
+	}
+	if r.deps.Recap == nil {
+		return reply(s, i, msg.DevRecapOff)
+	}
+
+	weeks := 0
+	for _, opt := range i.ApplicationCommandData().Options {
+		if opt.Name == "weeks" {
+			weeks = int(opt.IntValue())
+		}
+	}
+	weeks = max(0, min(weeks, 52)) // the history is far shorter than a year anyway
+
+	// The preview is posted as ordinary messages (the same code the Sunday post uses), so the reply only has to say it went out.
+	if err := r.deps.Recap.Preview(i.ChannelID, weeks); err != nil {
+		_ = reply(s, i, msg.CommandFailed)
+		return fmt.Errorf("preview recap: %w", err)
+	}
+	return reply(s, i, msg.DevRecapSent)
 }
 
 // deferReply shows "the bot is thinking..." and gives us 15 minutes to answer.

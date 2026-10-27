@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 )
@@ -26,6 +27,10 @@ type record struct {
 type fileData struct {
 	Version   int               `json:"version"`
 	Announced map[string]record `json:"announced"` // by YouTube video ID
+
+	// LastRecap is the end of the last weekly recap window that was posted.
+	// It is how a restart knows the recap of this week is already out.
+	LastRecap time.Time `json:"lastRecap"`
 }
 
 // File is a broadcast.Memory backed by one JSON file. The whole file is rewritten on every change, which is fine at this size (a few hundred streams a year).
@@ -60,6 +65,7 @@ func Open(path string) (*File, error) {
 	if d.Announced != nil {
 		f.data.Announced = d.Announced
 	}
+	f.data.LastRecap = d.LastRecap
 	return f, nil
 }
 
@@ -75,6 +81,22 @@ func (f *File) Put(videoID string, a broadcast.Announced) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.data.Announced[videoID] = record{MessageID: a.MessageID, State: int(a.State), Text: a.Text}
+	return f.save()
+}
+
+// LastRecap is the end of the last recap window that was posted; the zero time when no recap has been handled yet.
+func (f *File) LastRecap() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.LastRecap
+}
+
+// SetLastRecap remembers that the recap for the window ending at t is done.
+// As with Put, the value is kept for this run even if saving fails.
+func (f *File) SetLastRecap(t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.data.LastRecap = t.UTC()
 	return f.save()
 }
 

@@ -98,19 +98,29 @@ func (f *File) Record(s broadcast.Stream) error {
 	return f.save()
 }
 
-// Ended returns the finished streams that started in [from, to), oldest first.
+// Ended returns the streams that finished in [from, to), oldest first.
+// "Finished" is judged by the moment a stream ended, not the moment it started: a stream that is still live when one recap is made then lands in the next one, and no stream can fall between two recaps. (A stream whose end time we never learnt is placed by its start time instead.)
 func (f *File) Ended(from, to time.Time) []Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.State == "ended" && !e.Start.IsZero() && !e.Start.Before(from) && e.Start.Before(to) {
+		at := e.finishedAt()
+		if e.State == "ended" && !at.IsZero() && !at.Before(from) && at.Before(to) {
 			out = append(out, e)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Start.Before(out[j].Start) })
+	sort.Slice(out, func(i, j int) bool { return out[i].finishedAt().Before(out[j].finishedAt()) })
 	return out
+}
+
+// finishedAt is when the stream ended, falling back to its start.
+func (e Entry) finishedAt() time.Time {
+	if !e.End.IsZero() {
+		return e.End
+	}
+	return e.Start
 }
 
 func stateName(s broadcast.State) string {

@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/bwmarrin/discordgo"
 	"github.com/joho/godotenv"
@@ -21,6 +22,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/ops"
 	"github.com/Nadif243/fancord-bot/internal/poller"
+	"github.com/Nadif243/fancord-bot/internal/recap"
 	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
@@ -79,11 +81,24 @@ func run(log *slog.Logger) error {
 		source = youtube.NewClient(cfg.YouTube.APIKey)
 	}
 
+	// The recap reads the history, so it only makes sense while the poller
+	// is filling it.
+	pollerOn := source != nil && cfg.YouTube.ChannelID != ""
+	var recapService *recap.Service
+	if pollerOn {
+		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log)
+	}
+	var preview discord.RecapPreviewer // stays a nil interface when the recap is off
+	if recapService != nil {
+		preview = recapService
+	}
+
 	router := discord.NewRouter(log, discord.Deps{
 		DevAnnouncer:     devAnnouncer,
 		DevChannelID:     cfg.Channels.Test,
 		Source:           source,
 		YouTubeChannelID: cfg.YouTube.ChannelID,
+		Recap:            preview,
 	})
 	s.AddHandler(router.OnInteraction)
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
@@ -124,8 +139,9 @@ func run(log *slog.Logger) error {
 
 	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)
 
-	if source != nil && cfg.YouTube.ChannelID != "" {
+	if pollerOn {
 		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).Run)
+		start(recapService.Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
 	}

@@ -20,6 +20,7 @@ var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 const (
 	defaultDataFile         = "data/state.json"
 	defaultHistoryFile      = "data/history.json"
+	defaultPartnersFile     = "partners.csv"
 	defaultPollSeconds      = 120
 	minPollSeconds          = 30
 	defaultHeartbeatSeconds = 60
@@ -51,6 +52,7 @@ type Pings struct {
 type Config struct {
 	DataFile       string // where the bot remembers what it announced
 	HistoryFile    string // where it records every stream it sees, for the recap
+	PartnersFile   string // the collab partner list (CSV) the recap reads
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
@@ -122,6 +124,11 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
+
+	c.PartnersFile = get("PARTNERS_FILE")
+	if c.PartnersFile == "" {
+		c.PartnersFile = defaultPartnersFile
+	}
 
 	c.HistoryFile = get("HISTORY_FILE")
 	if c.HistoryFile == "" {

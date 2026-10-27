@@ -42,11 +42,23 @@ type Service struct {
 	settle    time.Duration // how long after the due time to wait before posting
 	log       *slog.Logger
 	now       func() time.Time
+
+	partners Matcher // nil: no collab line
+	opsID    string  // where the "unknown handles" note goes; empty: no note
 }
 
 // New makes a Service. settle should be a little longer than the poll interval: the stream that ended just before the deadline has to be seen as ended by the poller before the recap counts it.
 func New(src Source, send Sender, marker Marker, channelID string, settle time.Duration, log *slog.Logger) *Service {
 	return &Service{src: src, send: send, marker: marker, channelID: channelID, settle: settle, log: log, now: time.Now}
+}
+
+// WithPartners turns on the collab line. A note about @handles that are not in
+// the partner list is sent to opsChannelID after each weekly recap (and to the
+// channel of a /devrecap preview). Either may be empty.
+func (s *Service) WithPartners(m Matcher, opsChannelID string) *Service {
+	s.partners = m
+	s.opsID = opsChannelID
+	return s
 }
 
 // Run checks once a minute whether a recap is due, until ctx ends.
@@ -88,16 +100,33 @@ func (s *Service) tick() {
 		return
 	}
 
-	texts := s.render(due)
+	texts, note := s.render(due)
 	if err := s.post(s.channelID, texts, func() { s.remember(due) }); err != nil {
 		s.log.Error("could not post the weekly recap; will try again", "err", err)
+		return
 	}
+	s.sendNote(s.opsID, note)
 }
 
-// render builds the messages for the window ending at due.
-func (s *Service) render(due time.Time) []string {
+// render builds the messages for the window ending at due, and the ops note about unknown handles ("" when there is nothing to say).
+func (s *Service) render(due time.Time) (texts []string, note string) {
 	from := due.Add(-window)
-	return msg.Recap(Build(s.src.Ended(from, due), from, due))
+	entries := s.src.Ended(from, due)
+	texts = msg.Recap(Build(entries, from, due, s.partners))
+	if unknown := UnknownHandles(entries, s.partners); len(unknown) > 0 {
+		note = msg.RecapUnknownHandles(unknown)
+	}
+	return texts, note
+}
+
+// sendNote posts the ops note. It is a courtesy: a failure is only logged.
+func (s *Service) sendNote(channelID, note string) {
+	if note == "" || channelID == "" {
+		return
+	}
+	if _, err := s.send.Send(channelID, note); err != nil {
+		s.log.Warn("could not post the unknown-handles note", "err", err)
+	}
 }
 
 // post sends the messages in order. afterFirst runs once the first message is out: from then on the recap counts as posted, so a failure further down leaves a short recap rather than causing a second full one.
@@ -126,5 +155,10 @@ func (s *Service) Preview(channelID string, weeksAgo int) error {
 		return errors.New("weeksAgo cannot be negative")
 	}
 	due := LastDue(s.now()).AddDate(0, 0, -7*weeksAgo)
-	return s.post(channelID, s.render(due), nil)
+	texts, note := s.render(due)
+	if err := s.post(channelID, texts, nil); err != nil {
+		return err
+	}
+	s.sendNote(channelID, note)
+	return nil
 }

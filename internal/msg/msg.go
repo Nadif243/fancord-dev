@@ -133,6 +133,12 @@ type RecapDay struct {
 	Total time.Duration
 }
 
+// RecapCollab is one collab partner and the number of streams they were in.
+type RecapCollab struct {
+	Name    string
+	Streams int
+}
+
 // RecapWeek is everything the recap says. The recap package fills it in; this package only decides how it reads. A nil Longest or Busiest means the line is left out because it would add nothing (one stream, or one day).
 type RecapWeek struct {
 	From, To time.Time // the window, in WIB
@@ -140,6 +146,7 @@ type RecapWeek struct {
 	Total    time.Duration
 	Longest  *RecapStream
 	Busiest  *RecapDay
+	Collabs  []RecapCollab // most streams first; empty = the line is left out
 }
 
 // A Discord message holds at most 2000 characters; stay clear of it.
@@ -179,6 +186,9 @@ func Recap(w RecapWeek) []string {
 		b.WriteString(fmt.Sprintf("\n📅 Hari tersibuk: **%s**, %s (%d stream · %s)",
 			dayNames[w.Busiest.Day.Weekday()], shortDate(w.Busiest.Day), w.Busiest.Count, duration(w.Busiest.Total)))
 	}
+	if len(w.Collabs) > 0 {
+		b.WriteString("\n🤝 Kolaborasi: " + collabList(w.Collabs))
+	}
 	b.WriteString("\n\n**Daftar stream**")
 
 	// Fill messages line by line; a line is never cut in half.
@@ -209,6 +219,23 @@ func recapWatch(st RecapStream) string {
 	return fmt.Sprintf(" · [%s](<%s>)", recapWatchLabel, st.URL)
 }
 
+// recapMaxCollabs keeps the summary short in a week with many guests.
+const recapMaxCollabs = 10
+
+// collabList reads like "@A (3×), @B (1×) dan 4 lainnya".
+func collabList(collabs []RecapCollab) string {
+	shown := collabs[:min(len(collabs), recapMaxCollabs)]
+	parts := make([]string, len(shown))
+	for i, c := range shown {
+		parts[i] = fmt.Sprintf("%s (%d×)", escape(shorten(c.Name, 40)), c.Streams)
+	}
+	out := strings.Join(parts, ", ")
+	if rest := len(collabs) - len(shown); rest > 0 {
+		out += fmt.Sprintf(" dan %d lainnya", rest)
+	}
+	return out
+}
+
 func recapLine(st RecapStream) string {
 	line := fmt.Sprintf("• %s %s · %s", dayNames[st.Start.Weekday()][:3], shortDate(st.Start), recapTitle(st))
 	if st.Duration > 0 {
@@ -236,6 +263,21 @@ func duration(d time.Duration) string {
 		parts = append(parts, fmt.Sprintf("%d detik", sec))
 	}
 	return strings.Join(parts, " ")
+}
+
+// RecapUnknownHandles is the ops note (English) that follows a recap when titles hold @handles that are not in the partners file. The handles come from titles, so they are escaped like any other outside text.
+func RecapUnknownHandles(handles []string) string {
+	const maxHandles = 15
+	shown := handles[:min(len(handles), maxHandles)]
+	parts := make([]string, len(shown))
+	for i, h := range shown {
+		parts[i] = escape("@" + h)
+	}
+	out := "⚠️ These handles are in this week's stream titles but not in partners.csv: " + strings.Join(parts, ", ")
+	if rest := len(handles) - len(shown); rest > 0 {
+		out += fmt.Sprintf(" and %d more", rest)
+	}
+	return out + ". Add them if they are collab partners (or as kind \"ignore\" if not)."
 }
 
 // DevRecapDescription and friends are the texts of /devrecap.

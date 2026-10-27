@@ -21,6 +21,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/ops"
+	"github.com/Nadif243/fancord-bot/internal/partners"
 	"github.com/Nadif243/fancord-bot/internal/poller"
 	"github.com/Nadif243/fancord-bot/internal/recap"
 	"github.com/Nadif243/fancord-bot/internal/store"
@@ -38,6 +39,21 @@ func main() {
 		log.Error("bot stopped with an error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// loadPartners reads the collab partner list. No file is fine (the recap then has no collab line); a file with mistakes stops the bot, with every mistake listed, because quietly ignoring it would hide partners from the recap.
+// The result is nil when there is no list, which recap.WithPartners accepts.
+func loadPartners(path string, log *slog.Logger) (recap.Matcher, error) {
+	book, err := partners.Load(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		log.Info("no partners file: the recap will not list collab partners", "path", path)
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	log.Info("partners file ready", "path", path, "partners", book.Len())
+	return book, nil
 }
 
 func run(log *slog.Logger) error {
@@ -86,7 +102,12 @@ func run(log *slog.Logger) error {
 	pollerOn := source != nil && cfg.YouTube.ChannelID != ""
 	var recapService *recap.Service
 	if pollerOn {
-		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log)
+		book, err := loadPartners(cfg.PartnersFile, log)
+		if err != nil {
+			return err
+		}
+		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log).
+			WithPartners(book, cfg.Channels.Ops)
 	}
 	var preview discord.RecapPreviewer // stays a nil interface when the recap is off
 	if recapService != nil {

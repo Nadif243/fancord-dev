@@ -5,6 +5,7 @@ package recap
 
 import (
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/history"
@@ -31,8 +32,17 @@ func LastDue(now time.Time) time.Time {
 	return d
 }
 
+// Matcher spots collab partners in a stream title. *partners.Book satisfies it.
+type Matcher interface {
+	// Match returns the display names of the partners named in the title.
+	Match(title string) []string
+	// Unknown returns @handles in the title that the partner list does not know.
+	Unknown(title string) []string
+}
+
 // Build turns the streams that ended in [from, to) into what the recap says.
-func Build(entries []history.Entry, from, to time.Time) msg.RecapWeek {
+// partners may be nil: the recap then has no collab line.
+func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.RecapWeek {
 	w := msg.RecapWeek{From: from.In(WIB), To: to.In(WIB)}
 
 	for _, e := range entries {
@@ -58,7 +68,51 @@ func Build(entries []history.Entry, from, to time.Time) msg.RecapWeek {
 		w.Longest = longest(w.Streams)
 		w.Busiest = busiestDay(w.Streams)
 	}
+	w.Collabs = collabs(entries, partners)
 	return w
+}
+
+// collabs counts, for every partner named in a title, the streams they were
+// in. Most streams first; a tie goes to the name that comes first alphabetically.
+func collabs(entries []history.Entry, m Matcher) []msg.RecapCollab {
+	if m == nil {
+		return nil
+	}
+	count := map[string]int{}
+	for _, e := range entries {
+		for _, name := range m.Match(e.Title) { // each name once per title
+			count[name]++
+		}
+	}
+	var out []msg.RecapCollab
+	for name, n := range count {
+		out = append(out, msg.RecapCollab{Name: name, Streams: n})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Streams != out[j].Streams {
+			return out[i].Streams > out[j].Streams
+		}
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
+	return out
+}
+
+// UnknownHandles lists the @handles in these streams' titles that the partner list does not know, each once, oldest stream first.
+func UnknownHandles(entries []history.Entry, m Matcher) []string {
+	if m == nil {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	for _, e := range entries {
+		for _, h := range m.Unknown(e.Title) {
+			if k := strings.ToLower(h); !seen[k] {
+				seen[k] = true
+				out = append(out, h)
+			}
+		}
+	}
+	return out
 }
 
 // longest is the stream that ran the longest; the earlier one wins a tie.

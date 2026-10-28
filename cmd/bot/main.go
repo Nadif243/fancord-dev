@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
+	"github.com/Nadif243/fancord-bot/internal/collabs"
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/history"
@@ -41,9 +42,9 @@ func main() {
 	}
 }
 
-// loadPartners reads the collab partner list. No file is fine (the recap then has no collab line); a file with mistakes stops the bot, with every mistake listed, because quietly ignoring it would hide partners from the recap.
-// The result is nil when there is no list, which recap.WithPartners accepts.
-func loadPartners(path string, log *slog.Logger) (recap.Matcher, error) {
+// loadPartners reads the collab partner list. No file is fine (the recap then has no collab line, and /collab has no names to offer); a file with mistakes stops the bot, with every mistake listed, because quietly ignoring it would hide partners from the recap.
+// The result is nil when there is no list; a nil *partners.Book is a valid, empty one.
+func loadPartners(path string, log *slog.Logger) (*partners.Book, error) {
 	book, err := partners.Load(path)
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
@@ -101,13 +102,24 @@ func run(log *slog.Logger) error {
 	// is filling it.
 	pollerOn := source != nil && cfg.YouTube.ChannelID != ""
 	var recapService *recap.Service
+	var collab discord.CollabTagger // stays a nil interface when the recap is off
 	if pollerOn {
 		book, err := loadPartners(cfg.PartnersFile, log)
 		if err != nil {
 			return err
 		}
+		tags, err := collabs.OpenFile(cfg.CollabFile)
+		if err != nil {
+			return err
+		}
+		log.Info("collab tags file ready", "path", cfg.CollabFile)
+
+		// Who was in a stream = named in its title + tagged by hand - removed by hand.
+		// The recap and /collab both go through this one service.
+		who := collabs.NewService(book, tags, streams)
 		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log).
-			WithPartners(book, cfg.Channels.Ops)
+			WithPartners(who, cfg.Channels.Ops)
+		collab = who
 	}
 	var preview discord.RecapPreviewer // stays a nil interface when the recap is off
 	if recapService != nil {
@@ -120,6 +132,7 @@ func run(log *slog.Logger) error {
 		Source:           source,
 		YouTubeChannelID: cfg.YouTube.ChannelID,
 		Recap:            preview,
+		Collab:           collab,
 	})
 	s.AddHandler(router.OnInteraction)
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {

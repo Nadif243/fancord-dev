@@ -2,14 +2,15 @@
 //
 // The list lives in a CSV file (partners.csv) that is easy to edit in Excel:
 //
-//		name,kind,also_matches
-//		@SilviaValleria,partner,silvia|sylvia|kocak
-//		@yuurayozakura,ignore,
+//		name,kind,also_matches,members
+//		@SilviaValleria,partner,silvia|via,
+//		Squad Kocak,group,kocak|squad kocak,@SilviaValleria|@naplive7|@figaarfiansyah
+//		@yuurayozakura,ignore,,
 //
-//	  - name: what the recap shows. It is also matched in titles, with orwithou t a leading "@".
-//	  - kind: "partner" (the default) is counted and shown in the recap;
-//	    "ignore" is known but never shown (her own handle, say), so it is not reported as an unknown handle either.
+//	  - name: what the recap shows. It is also matched in titles, with or without a leading "@".
+//	  - kind: "partner" (the default) is counted and shown in the recap; "group" is a team: naming it in a title (or typing it in /collab) means all of its members; "ignore" is known but never shown (her own handle, say), so it is not reported as an unknown handle either.
 //	  - also_matches: other spellings, separated by "|".
+//	  - members: for a group only, the partners in it, separated by "|".
 //
 // A spelling matches only as a whole word, ignoring capitals: "dina" matches in "Main bareng Dina!" and in "@Dina", but not inside "@DinaMostarterra" (that one is matched by its own name) or in "dinamit".
 package partners
@@ -32,12 +33,14 @@ type kind int
 const (
 	kindPartner kind = iota + 1
 	kindIgnore
+	kindGroup
 )
 
 type entry struct {
-	name   string
-	kind   kind
-	tokens []string // lower-case spellings, whole-word matched
+	name    string
+	kind    kind
+	tokens  []string // lower-case spellings, whole-word matched
+	members []string // groups only: the display names of the partners in it
 }
 
 // Book is the loaded list. A nil *Book is a valid, empty list: it matches nothing, so the recap simply has no collab line.
@@ -60,6 +63,20 @@ func (b *Book) Len() int {
 	return n
 }
 
+// Groups returns the names of the groups, in file order.
+func (b *Book) Groups() []string {
+	if b == nil {
+		return nil
+	}
+	var out []string
+	for _, e := range b.entries {
+		if e.kind == kindGroup {
+			out = append(out, e.name)
+		}
+	}
+	return out
+}
+
 // Load reads the file. The error wraps fs.ErrNotExist when there is no file, so the caller can treat that as "feature off".
 func Load(path string) (*Book, error) {
 	raw, err := os.ReadFile(path)
@@ -73,7 +90,7 @@ func Load(path string) (*Book, error) {
 	return b, nil
 }
 
-var knownColumns = []string{"name", "kind", "also_matches"}
+var knownColumns = []string{"name", "kind", "also_matches", "members"}
 
 // Parse reads the CSV text. All problems are reported together, so the file can be fixed in one go.
 func Parse(raw []byte) (*Book, error) {
@@ -86,7 +103,7 @@ func Parse(raw []byte) (*Book, error) {
 
 	header, err := r.Read()
 	if errors.Is(err, io.EOF) {
-		return nil, errors.New("the file is empty; the first line must be: name,kind,also_matches")
+		return nil, errors.New("the file is empty; the first line must be: name,kind,also_matches,members")
 	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read the first line: %w", err)
@@ -116,7 +133,8 @@ func Parse(raw []byte) (*Book, error) {
 	}
 
 	b := &Book{known: map[string]bool{}}
-	seen := map[string]int{} // lower-case name -> line
+	seen := map[string]int{}       // lower-case name -> line
+	memberLine := map[string]int{} // group name -> line, for the second pass
 	for {
 		rec, err := r.Read()
 		if errors.Is(err, io.EOF) {
@@ -136,14 +154,20 @@ func Parse(raw []byte) (*Book, error) {
 			problems = append(problems, fmt.Sprintf("line %d: the name is empty", line))
 			continue
 		}
+		if strings.Contains(name, ",") {
+			problems = append(problems, fmt.Sprintf("line %d (%s): a name cannot contain a comma (commas separate names when typing in /collab)", line, name))
+			continue
+		}
 		e := entry{name: name}
 		switch strings.ToLower(cell(rec, "kind")) {
 		case "", "partner":
 			e.kind = kindPartner
 		case "ignore":
 			e.kind = kindIgnore
+		case "group":
+			e.kind = kindGroup
 		default:
-			problems = append(problems, fmt.Sprintf("line %d (%s): kind must be partner or ignore, got %q", line, name, cell(rec, "kind")))
+			problems = append(problems, fmt.Sprintf("line %d (%s): kind must be partner, group or ignore, got %q", line, name, cell(rec, "kind")))
 			continue
 		}
 		if first, dup := seen[strings.ToLower(name)]; dup {
@@ -152,11 +176,31 @@ func Parse(raw []byte) (*Book, error) {
 		}
 		seen[strings.ToLower(name)] = line
 
+		members := cell(rec, "members")
+		if e.kind != kindGroup && members != "" {
+			problems = append(problems, fmt.Sprintf("line %d (%s): only a group can have members", line, name))
+		}
+		if e.kind == kindGroup {
+			for _, m := range strings.Split(members, "|") {
+				if m = strings.TrimSpace(m); m != "" {
+					e.members = append(e.members, m)
+				}
+			}
+			if len(e.members) == 0 {
+				problems = append(problems, fmt.Sprintf("line %d (%s): a group needs members", line, name))
+			}
+			memberLine[name] = line
+		}
+
 		spellings := append([]string{strings.TrimPrefix(name, "@")}, strings.Split(cell(rec, "also_matches"), "|")...)
 		for _, s := range spellings {
 			t := normalise(s)
 			if t == "" {
 				continue // "a||b" or a trailing "|"
+			}
+			if strings.Contains(t, ",") {
+				problems = append(problems, fmt.Sprintf("line %d (%s): %q cannot contain a comma", line, name, s))
+				continue
 			}
 			if utf8.RuneCountInString(t) < 2 || !hasLetterOrDigit(t) {
 				problems = append(problems, fmt.Sprintf("line %d (%s): %q is too short to match safely", line, name, s))
@@ -169,6 +213,30 @@ func Parse(raw []byte) (*Book, error) {
 		}
 		b.entries = append(b.entries, e)
 	}
+
+	// Second pass: a group may list partners that appear further down the file.
+	byName := map[string]*entry{}
+	for i := range b.entries {
+		byName[strings.TrimPrefix(strings.ToLower(b.entries[i].name), "@")] = &b.entries[i]
+	}
+	for i := range b.entries {
+		g := &b.entries[i]
+		if g.kind != kindGroup {
+			continue
+		}
+		for j, m := range g.members {
+			p := byName[strings.TrimPrefix(strings.ToLower(m), "@")]
+			switch {
+			case p == nil:
+				problems = append(problems, fmt.Sprintf("line %d (%s): member %q is not in the file", memberLine[g.name], g.name, m))
+			case p.kind != kindPartner:
+				problems = append(problems, fmt.Sprintf("line %d (%s): member %q must be a partner, not a group or an ignore row", memberLine[g.name], g.name, m))
+			default:
+				g.members[j] = p.name // the display name, however it was typed
+			}
+		}
+	}
+
 	if len(problems) > 0 {
 		return nil, joinProblems(problems)
 	}
@@ -184,25 +252,121 @@ func delimiter(raw []byte) rune {
 	return ','
 }
 
-// Match returns the display names of the partners named in the title, in the order of the file, each once.
+// Match returns the display names of the partners named in the title, in the order of the file, each once. A group named in the title counts as all of its members; a person who was absent is taken out afterwards by hand.
 func (b *Book) Match(title string) []string {
 	if b == nil {
 		return nil
 	}
 	text := normalise(title)
-	var out []string
+	named := map[string]bool{}
 	for _, e := range b.entries {
-		if e.kind != kindPartner {
+		if e.kind == kindIgnore || !anyWord(text, e.tokens) {
 			continue
 		}
-		for _, t := range e.tokens {
-			if hasWord(text, t) {
-				out = append(out, e.name)
-				break
+		if e.kind == kindGroup {
+			for _, m := range e.members {
+				named[m] = true
 			}
+		} else {
+			named[e.name] = true
+		}
+	}
+	return b.inFileOrder(named)
+}
+
+// Resolve reads names typed by a person, such as "dina, kocak": partners (by name, handle or nickname) and groups, separated by commas. A group stands for all its members. It returns the partners in file order, and the terms it did not recognise.
+func (b *Book) Resolve(text string) (names, unknown []string) {
+	if b == nil {
+		return nil, nil
+	}
+	named := map[string]bool{}
+	for _, term := range strings.Split(text, ",") {
+		t := normalise(strings.TrimPrefix(strings.TrimSpace(term), "@"))
+		if t == "" {
+			continue
+		}
+		found := false
+		for _, e := range b.entries {
+			if e.kind == kindIgnore || !contains(e.tokens, t) {
+				continue
+			}
+			found = true
+			if e.kind == kindGroup {
+				for _, m := range e.members {
+					named[m] = true
+				}
+			} else {
+				named[e.name] = true
+			}
+		}
+		if !found {
+			unknown = append(unknown, strings.TrimSpace(term))
+		}
+	}
+	return b.inFileOrder(named), unknown
+}
+
+// inFileOrder lists the partners in the set, in the order of the file.
+func (b *Book) inFileOrder(set map[string]bool) []string {
+	var out []string
+	for _, e := range b.entries {
+		if e.kind == kindPartner && set[e.name] {
+			out = append(out, e.name)
 		}
 	}
 	return out
+}
+
+// Suggestion is a partner or a group that can be typed in /collab.
+type Suggestion struct {
+	Name    string
+	Members int // 0 for a partner; the number of members for a group
+}
+
+// Suggest lists the partners and groups whose name or spellings contain the typed text (capitals and a leading "@" do not matter; empty means all), for autocomplete. Groups come first, then partners in the order of the file.
+func (b *Book) Suggest(typed string, n int) []Suggestion {
+	if b == nil || n <= 0 {
+		return nil
+	}
+	q := normalise(strings.TrimPrefix(strings.TrimSpace(typed), "@"))
+	var groups, people []Suggestion
+	for _, e := range b.entries {
+		if e.kind == kindIgnore || !(q == "" || anySubstring(e.tokens, q)) {
+			continue
+		}
+		if e.kind == kindGroup {
+			groups = append(groups, Suggestion{Name: e.name, Members: len(e.members)})
+		} else {
+			people = append(people, Suggestion{Name: e.name})
+		}
+	}
+	out := append(groups, people...)
+	if len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+func anySubstring(tokens []string, q string) bool {
+	for _, t := range tokens {
+		if strings.Contains(t, q) {
+			return true
+		}
+	}
+	return false
+}
+
+// Has reports whether name is the display name of a partner on the list.
+func (b *Book) Has(name string) bool {
+	if b == nil {
+		return false
+	}
+	for _, e := range b.entries {
+		if e.kind == kindPartner && e.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // atHandle finds "@something" that is not the tail of a longer word (so an e-mail address is not mistaken for a handle).
@@ -230,6 +394,15 @@ func (b *Book) Unknown(title string) []string {
 // normalise lower-cases and puts the text on one line with single spaces.
 func normalise(s string) string {
 	return strings.ToLower(strings.Join(strings.Fields(s), " "))
+}
+
+func anyWord(text string, tokens []string) bool {
+	for _, t := range tokens {
+		if hasWord(text, t) {
+			return true
+		}
+	}
+	return false
 }
 
 // hasWord reports whether tok occurs in text as a whole word.

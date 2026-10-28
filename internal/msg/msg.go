@@ -288,6 +288,86 @@ const (
 	DevRecapOff              = "Rekap belum aktif. Isi YOUTUBE_API_KEY dan YOUTUBE_CHANNEL_ID di .env lalu jalankan ulang bot."
 )
 
+// ---- Collab tagging (English, dev channel only) ---------------------------
+
+const (
+	CollabDescription       = "Tag who was in a stream with Yuura (dev only)"
+	CollabStreamDescription = "The stream: pick one from the list, or paste its YouTube link"
+	CollabAddDescription    = "Partners or teams who were there, separated by commas"
+	CollabRemoveDescription = "Partners or teams who were NOT there, separated by commas"
+	CollabOff               = "Collab tagging is off. Set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID in .env and restart the bot."
+	CollabNoStream          = "I don't know that stream. Pick one from the list that appears while typing, or paste the YouTube link of a stream the bot has seen."
+	CollabNotSaved          = "⚠️ It could not be saved to disk. It holds until the bot restarts, so please try again."
+)
+
+// zoneWIB is Western Indonesia Time, which Indonesia keeps all year.
+var zoneWIB = time.FixedZone("WIB", 7*60*60)
+
+// dateLabel reads like "Sel 20 Okt", in WIB. An unknown time reads "?".
+func dateLabel(t time.Time) string {
+	if t.IsZero() {
+		return "?"
+	}
+	t = t.In(zoneWIB)
+	return dayNames[t.Weekday()][:3] + " " + shortDate(t)
+}
+
+// CollabStreamLabel is one line in the list of streams that appears while typing /collab. It is plain text (Discord does not format these labels), at most 100 characters, with a 🤝 when somebody is already tagged.
+func CollabStreamLabel(start time.Time, title string, tagged bool) string {
+	label := dateLabel(start) + " · " + strings.Join(strings.Fields(title), " ")
+	if tagged {
+		label = "🤝 " + label
+	}
+	return shorten(label, 100)
+}
+
+// CollabNameLabel is one partner or team in the list that appears while typing a name. members is 0 for a partner and the team size for a team.
+func CollabNameLabel(name string, members int) string {
+	if members > 0 {
+		return fmt.Sprintf("👥 %s (%d)", name, members)
+	}
+	return name
+}
+
+// CollabDone answers /collab: the stream, who is tagged now, and what changed.
+func CollabDone(title string, start time.Time, partners, added, removed []string, by string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "🤝 **%s** · %s\n", dateLabel(start), escape(shorten(title, 80)))
+	if len(partners) == 0 {
+		b.WriteString("Collab partners: none")
+	} else {
+		b.WriteString("Collab partners: " + escapeAll(partners))
+	}
+	if len(added) > 0 {
+		b.WriteString("\n➕ " + escapeAll(added))
+	}
+	if len(removed) > 0 {
+		b.WriteString("\n➖ " + escapeAll(removed))
+	}
+	if len(added) == 0 && len(removed) == 0 {
+		b.WriteString("\nNo change.")
+	}
+	if by != "" {
+		b.WriteString("\nUpdated by " + escape(by))
+	}
+	return b.String()
+}
+
+// CollabUnknown answers /collab when some typed names are not on the list.
+func CollabUnknown(unknown []string) string {
+	return "I don't recognise: " + escapeAll(unknown) + ". Nothing was changed.\n" +
+		"Names must be on the partner list (partners.csv): a name, handle or nickname from it. Pick from the suggestions while typing, or add the person to the file and restart the bot."
+}
+
+// escapeAll escapes each text and joins them with commas.
+func escapeAll(list []string) string {
+	parts := make([]string, len(list))
+	for i, s := range list {
+		parts[i] = escape(s)
+	}
+	return strings.Join(parts, ", ")
+}
+
 // shorten cuts s to at most max characters (not bytes, so no emoji or Japanese character is ever cut in half).
 func shorten(s string, max int) string {
 	r := []rune(s)

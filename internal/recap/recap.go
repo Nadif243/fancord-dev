@@ -32,10 +32,10 @@ func LastDue(now time.Time) time.Time {
 	return d
 }
 
-// Matcher spots collab partners in a stream title. *partners.Book satisfies it.
+// Matcher says who was in a stream. *collabs.Service satisfies it: the partners named in the title plus those added by hand, minus those removed by hand.
 type Matcher interface {
-	// Match returns the display names of the partners named in the title.
-	Match(title string) []string
+	// Partners returns the display names of the partners who were in the stream.
+	Partners(videoID, title string) []string
 	// Unknown returns @handles in the title that the partner list does not know.
 	Unknown(title string) []string
 }
@@ -68,19 +68,18 @@ func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.Re
 		w.Longest = longest(w.Streams)
 		w.Busiest = busiestDay(w.Streams)
 	}
-	w.Collabs = collabs(entries, partners)
+	w.Collabs = countCollabs(entries, partners)
 	return w
 }
 
-// collabs counts, for every partner named in a title, the streams they were
-// in. Most streams first; a tie goes to the name that comes first alphabetically.
-func collabs(entries []history.Entry, m Matcher) []msg.RecapCollab {
+// countCollabs counts, for every partner who was in a stream, the streams they were in. Most streams first; a tie goes to the name that comes first alphabetically.
+func countCollabs(entries []history.Entry, m Matcher) []msg.RecapCollab {
 	if m == nil {
 		return nil
 	}
 	count := map[string]int{}
 	for _, e := range entries {
-		for _, name := range m.Match(e.Title) { // each name once per title
+		for _, name := range m.Partners(e.VideoID, e.Title) { // each name once per stream
 			count[name]++
 		}
 	}

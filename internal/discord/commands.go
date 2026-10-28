@@ -2,6 +2,7 @@ package discord
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -11,7 +12,9 @@ import (
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
+	"github.com/Nadif243/fancord-bot/internal/collabs"
 	"github.com/Nadif243/fancord-bot/internal/msg"
+	"github.com/Nadif243/fancord-bot/internal/partners"
 )
 
 // handler runs one slash command. Returning an error only logs it; the user already got whatever the handler managed to reply.
@@ -28,6 +31,13 @@ type RecapPreviewer interface {
 	Preview(channelID string, weeksAgo int) error
 }
 
+// CollabTagger lets people say who was in a stream. *collabs.Service satisfies it.
+type CollabTagger interface {
+	Recent(query string, n int) []collabs.StreamRef
+	Suggest(typed string, n int) []partners.Suggestion
+	Change(videoID, add, remove string) (collabs.Outcome, error)
+}
+
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
 	DevAnnouncer     *broadcast.Announcer // for /devstream only: it posts fake streams and forgets them
@@ -35,6 +45,7 @@ type Deps struct {
 	Source           StreamSource         // nil when no YouTube key is configured
 	YouTubeChannelID string               // her channel, the default for /devcheck
 	Recap            RecapPreviewer       // nil when the recap is off
+	Collab           CollabTagger         // nil when the recap is off
 }
 
 // Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
@@ -42,11 +53,18 @@ type Router struct {
 	log      *slog.Logger
 	defs     []*discordgo.ApplicationCommand
 	handlers map[string]handler
-	deps     Deps
+	// suggest answers the "type to search" lists of a command's options, by command name. It returns what to offer for the option being typed.
+	suggest map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice
+	deps    Deps
 }
 
 func NewRouter(log *slog.Logger, deps Deps) *Router {
-	r := &Router{log: log, handlers: map[string]handler{}, deps: deps}
+	r := &Router{
+		log:      log,
+		handlers: map[string]handler{},
+		suggest:  map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice{},
+		deps:     deps,
+	}
 
 	r.add(&discordgo.ApplicationCommand{Name: "ping", Description: msg.PingDescription}, handlePing)
 
@@ -96,6 +114,30 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 		}},
 	}, r.handleDevRecap)
 
+	// /collab says who was in a stream with her. Her titles often do not say, so people who watched (or who ask on Saturday) tag it by hand. All three options offer a list while typing; see collabChoices.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "collab",
+		Description: msg.CollabDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:         discordgo.ApplicationCommandOptionString,
+			Name:         "stream",
+			Description:  msg.CollabStreamDescription,
+			Required:     true,
+			Autocomplete: true,
+		}, {
+			Type:         discordgo.ApplicationCommandOptionString,
+			Name:         "add",
+			Description:  msg.CollabAddDescription,
+			Autocomplete: true,
+		}, {
+			Type:         discordgo.ApplicationCommandOptionString,
+			Name:         "remove",
+			Description:  msg.CollabRemoveDescription,
+			Autocomplete: true,
+		}},
+	}, r.handleCollab)
+	r.suggest["collab"] = r.collabChoices
+
 	return r
 }
 
@@ -114,9 +156,43 @@ func (r *Router) Register(s *discordgo.Session, appID, guildID string) error {
 
 // OnInteraction is the handler to pass to Session.AddHandler.
 func (r *Router) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionApplicationCommand {
-		return
+	switch i.Type {
+	case discordgo.InteractionApplicationCommand:
+		r.onCommand(s, i)
+	case discordgo.InteractionApplicationCommandAutocomplete:
+		r.onAutocomplete(s, i)
 	}
+}
+
+// onAutocomplete answers "what can I offer while this option is being typed?".
+// Discord wants an answer within 3 seconds, so this only looks at memory.
+// Anything that goes wrong simply offers nothing: it must never break typing.
+func (r *Router) onAutocomplete(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	name := i.ApplicationCommandData().Name
+	log := r.log.With("command", name, "autocomplete", true)
+
+	choices := []*discordgo.ApplicationCommandOptionChoice{} // never nil: Discord rejects null
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Error("autocomplete panicked", "panic", rec)
+			}
+		}()
+		if f, ok := r.suggest[name]; ok {
+			choices = append(choices, f(i)...)
+		}
+	}()
+
+	err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionApplicationCommandAutocompleteResult,
+		Data: &discordgo.InteractionResponseData{Choices: choices},
+	})
+	if err != nil {
+		log.Error("could not answer autocomplete", "err", err)
+	}
+}
+
+func (r *Router) onCommand(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	name := i.ApplicationCommandData().Name
 	log := r.log.With("command", name)
 
@@ -142,7 +218,8 @@ func (r *Router) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCre
 func reply(s *discordgo.Session, i *discordgo.InteractionCreate, content string) error {
 	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
-		Data: &discordgo.InteractionResponseData{Content: content},
+		// Whatever is in the text (a title, a typed name), it can never ping anyone.
+		Data: &discordgo.InteractionResponseData{Content: content, AllowedMentions: nobody()},
 	})
 }
 
@@ -241,6 +318,125 @@ func (r *Router) handleDevRecap(s *discordgo.Session, i *discordgo.InteractionCr
 		return fmt.Errorf("preview recap: %w", err)
 	}
 	return reply(s, i, msg.DevRecapSent)
+}
+
+// maxChoices is the most options Discord lets an autocomplete list hold.
+const maxChoices = 25
+
+// collabChoices offers what fits the option being typed: streams for "stream", partners and teams for "add" and "remove". Only in the dev channel.
+func (r *Router) collabChoices(i *discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice {
+	if r.deps.Collab == nil || i.ChannelID != r.deps.DevChannelID {
+		return nil
+	}
+	for _, opt := range i.ApplicationCommandData().Options {
+		if !opt.Focused {
+			continue
+		}
+		typed := opt.StringValue()
+		switch opt.Name {
+		case "stream":
+			return streamChoices(r.deps.Collab.Recent(typed, maxChoices))
+		case "add", "remove":
+			prefix, term := splitTyped(typed)
+			return nameChoices(prefix, r.deps.Collab.Suggest(term, maxChoices))
+		}
+	}
+	return nil
+}
+
+// streamChoices turns streams into list entries: the label is what a person reads, the value (the video ID) is what the command receives.
+func streamChoices(refs []collabs.StreamRef) []*discordgo.ApplicationCommandOptionChoice {
+	var out []*discordgo.ApplicationCommandOptionChoice
+	for _, ref := range refs {
+		if len(out) == maxChoices {
+			break
+		}
+		out = append(out, &discordgo.ApplicationCommandOptionChoice{
+			Name:  msg.CollabStreamLabel(ref.Start, ref.Title, len(ref.Partners) > 0),
+			Value: ref.ID,
+		})
+	}
+	return out
+}
+
+// splitTyped separates what was typed into the finished part and the name being typed now: "dina, ind" is "dina, " and "ind".
+func splitTyped(typed string) (prefix, term string) {
+	i := strings.LastIndex(typed, ",")
+	if i < 0 {
+		return "", strings.TrimSpace(typed)
+	}
+	return strings.TrimSpace(typed[:i]) + ", ", strings.TrimSpace(typed[i+1:])
+}
+
+// nameChoices offers partners and teams. Picking one replaces the whole text of the option, so every value starts with what was already typed.
+func nameChoices(prefix string, suggestions []partners.Suggestion) []*discordgo.ApplicationCommandOptionChoice {
+	var out []*discordgo.ApplicationCommandOptionChoice
+	for _, sg := range suggestions {
+		value := prefix + sg.Name
+		if len([]rune(value)) > 100 { // Discord's limit for a value
+			continue
+		}
+		label := []rune(prefix + msg.CollabNameLabel(sg.Name, sg.Members))
+		if len(label) > 100 {
+			label = label[:100]
+		}
+		out = append(out, &discordgo.ApplicationCommandOptionChoice{Name: string(label), Value: value})
+		if len(out) == maxChoices {
+			break
+		}
+	}
+	return out
+}
+
+// handleCollab tags a stream: who was there, and who was not.
+func (r *Router) handleCollab(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.ChannelID != r.deps.DevChannelID {
+		return reply(s, i, msg.DevOnly)
+	}
+	if r.deps.Collab == nil {
+		return reply(s, i, msg.CollabOff)
+	}
+
+	var stream, add, remove string
+	for _, opt := range i.ApplicationCommandData().Options {
+		switch opt.Name {
+		case "stream":
+			stream = opt.StringValue()
+		case "add":
+			add = opt.StringValue()
+		case "remove":
+			remove = opt.StringValue()
+		}
+	}
+
+	out, err := r.deps.Collab.Change(collabs.VideoID(stream), add, remove)
+	switch {
+	case errors.Is(err, collabs.ErrNoStream):
+		return reply(s, i, msg.CollabNoStream)
+	case errors.Is(err, collabs.ErrUnknownNames):
+		return reply(s, i, msg.CollabUnknown(out.Unknown))
+	}
+
+	text := msg.CollabDone(out.Stream.Title, out.Stream.Start, out.Stream.Partners, out.Added, out.Removed, userName(i))
+	if err != nil {
+		// The change holds in memory; only the file could not be written.
+		_ = reply(s, i, text+"\n"+msg.CollabNotSaved)
+		return fmt.Errorf("tag collab: %w", err)
+	}
+	return reply(s, i, text)
+}
+
+// userName is who ran the command, as shown in the server.
+func userName(i *discordgo.InteractionCreate) string {
+	switch {
+	case i.Member == nil:
+		return ""
+	case i.Member.Nick != "":
+		return i.Member.Nick
+	case i.Member.User != nil:
+		return i.Member.User.Username
+	}
+	return ""
 }
 
 // deferReply shows "the bot is thinking..." and gives us 15 minutes to answer.

@@ -21,6 +21,7 @@ const (
 	defaultDataFile         = "data/state.json"
 	defaultHistoryFile      = "data/history.json"
 	defaultPartnersFile     = "partners.csv"
+	defaultCollabFile       = "data/collabs.json"
 	defaultPollSeconds      = 120
 	minPollSeconds          = 30
 	defaultHeartbeatSeconds = 60
@@ -53,6 +54,7 @@ type Config struct {
 	DataFile       string // where the bot remembers what it announced
 	HistoryFile    string // where it records every stream it sees, for the recap
 	PartnersFile   string // the collab partner list (CSV) the recap reads
+	CollabFile     string // who people tagged as being in a stream, by hand
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
@@ -128,6 +130,11 @@ func Load(getenv func(string) string) (Config, error) {
 	c.PartnersFile = get("PARTNERS_FILE")
 	if c.PartnersFile == "" {
 		c.PartnersFile = defaultPartnersFile
+	}
+
+	c.CollabFile = get("COLLAB_FILE")
+	if c.CollabFile == "" {
+		c.CollabFile = defaultCollabFile
 	}
 
 	c.HistoryFile = get("HISTORY_FILE")

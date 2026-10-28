@@ -115,6 +115,46 @@ func (f *File) Ended(from, to time.Time) []Entry {
 	return out
 }
 
+// Get returns one stream by its YouTube video ID.
+func (f *File) Get(videoID string) (Entry, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	e, ok := f.data.Streams[videoID]
+	return e, ok
+}
+
+// Recent returns up to n streams that are live or finished (not waiting rooms), newest first by start time. It is what a person picks from when tagging a stream by hand.
+func (f *File) Recent(n int) []Entry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []Entry
+	for _, e := range f.data.Streams {
+		if e.State != "upcoming" {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i].startedAt(), out[j].startedAt()
+		if !a.Equal(b) {
+			return a.After(b)
+		}
+		return out[i].VideoID < out[j].VideoID // a fixed order for equal times
+	})
+	if n >= 0 && len(out) > n {
+		out = out[:n]
+	}
+	return out
+}
+
+// startedAt is when the stream began, falling back to when it ended.
+func (e Entry) startedAt() time.Time {
+	if !e.Start.IsZero() {
+		return e.Start
+	}
+	return e.End
+}
+
 // finishedAt is when the stream ended, falling back to its start.
 func (e Entry) finishedAt() time.Time {
 	if !e.End.IsZero() {

@@ -31,6 +31,9 @@ type fileData struct {
 	// LastRecap is the end of the last weekly recap window that was posted.
 	// It is how a restart knows the recap of this week is already out.
 	LastRecap time.Time `json:"lastRecap"`
+
+	// LastReminder is the moment of the last Saturday collab reminder that was handled, so a restart does not post it twice.
+	LastReminder time.Time `json:"lastReminder"`
 }
 
 // File is a broadcast.Memory backed by one JSON file. The whole file is rewritten on every change, which is fine at this size (a few hundred streams a year).
@@ -66,6 +69,7 @@ func Open(path string) (*File, error) {
 		f.data.Announced = d.Announced
 	}
 	f.data.LastRecap = d.LastRecap
+	f.data.LastReminder = d.LastReminder
 	return f, nil
 }
 
@@ -89,6 +93,21 @@ func (f *File) LastRecap() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.data.LastRecap
+}
+
+// LastReminder is the moment of the last collab reminder that was handled; the zero time when none has been.
+func (f *File) LastReminder() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.LastReminder
+}
+
+// SetLastReminder remembers that the reminder due at t is handled. As with SetLastRecap, the value is kept for this run even if saving fails.
+func (f *File) SetLastReminder(t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.data.LastReminder = t.UTC()
+	return f.save()
 }
 
 // SetLastRecap remembers that the recap for the window ending at t is done.

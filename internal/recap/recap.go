@@ -21,6 +21,24 @@ const (
 	window     = 7 * 24 * time.Hour
 )
 
+const (
+	// The collab reminder goes out this long before the recap: Saturday 12:00 WIB, which leaves a day and a half to check the week.
+	remindBefore = 32 * time.Hour
+	// A reminder that is more than this late is skipped.
+	remindGrace = 12 * time.Hour
+)
+
+// ReminderDue is the most recent reminder moment at or before now, and the recap it is about (the next one after that moment).
+func ReminderDue(now time.Time) (remind, recapDue time.Time) {
+	recapDue = LastDue(now).AddDate(0, 0, 7)
+	remind = recapDue.Add(-remindBefore)
+	if remind.After(now) {
+		recapDue = recapDue.AddDate(0, 0, -7)
+		remind = remind.AddDate(0, 0, -7)
+	}
+	return remind, recapDue
+}
+
 // LastDue is the most recent recap moment at or before now: the latest Sunday 20:00 WIB.
 func LastDue(now time.Time) time.Time {
 	t := now.In(WIB)
@@ -36,8 +54,12 @@ func LastDue(now time.Time) time.Time {
 type Matcher interface {
 	// Partners returns the display names of the partners who were in the stream.
 	Partners(videoID, title string) []string
+	// Summary shortens such a list for reading: a full team becomes its name.
+	Summary(names []string) []string
 	// Unknown returns @handles in the title that the partner list does not know.
 	Unknown(title string) []string
+	// Checked says whether a person has confirmed who was in the stream.
+	Checked(videoID string) bool
 }
 
 // Build turns the streams that ended in [from, to) into what the recap says.
@@ -45,22 +67,22 @@ type Matcher interface {
 func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.RecapWeek {
 	w := msg.RecapWeek{From: from.In(WIB), To: to.In(WIB)}
 
-	for _, e := range entries {
-		start := e.Start
-		if start.IsZero() {
-			start = e.End // we never learnt the start; this at least gives a day
-		}
-		w.Streams = append(w.Streams, msg.RecapStream{
-			Title:    e.Title,
-			URL:      "https://www.youtube.com/watch?v=" + e.VideoID,
-			Start:    start.In(WIB),
-			Duration: e.Duration(),
-		})
+	type item struct {
+		stream msg.RecapStream
+		who    []string // partners, one name each
 	}
-	sort.SliceStable(w.Streams, func(i, j int) bool { return w.Streams[i].Start.Before(w.Streams[j].Start) })
+	var items []item
+	for _, e := range entries {
+		st, who := streamOf(e, partners)
+		items = append(items, item{stream: st, who: who})
+	}
+	sort.SliceStable(items, func(i, j int) bool { return items[i].stream.Start.Before(items[j].stream.Start) })
 
-	for _, st := range w.Streams {
-		w.Total += st.Duration
+	var perStream []streamWho
+	for _, it := range items {
+		w.Streams = append(w.Streams, it.stream)
+		w.Total += it.stream.Duration
+		perStream = append(perStream, streamWho{start: it.stream.Start, names: it.who})
 	}
 
 	// With one stream (or one day) "longest" and "busiest" say nothing new, so those lines are left out.
@@ -68,24 +90,57 @@ func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.Re
 		w.Longest = longest(w.Streams)
 		w.Busiest = busiestDay(w.Streams)
 	}
-	w.Collabs = countCollabs(entries, partners)
+	w.Collabs = countCollabs(perStream)
 	return w
 }
 
-// countCollabs counts, for every partner who was in a stream, the streams they were in. Most streams first; a tie goes to the name that comes first alphabetically.
-func countCollabs(entries []history.Entry, m Matcher) []msg.RecapCollab {
-	if m == nil {
-		return nil
+// streamOf describes one history entry for a message, and returns who was in it (one name each, before any team is shortened). partners may be nil.
+func streamOf(e history.Entry, partners Matcher) (msg.RecapStream, []string) {
+	start := e.Start
+	if start.IsZero() {
+		start = e.End // we never learnt the start; this at least gives a day
 	}
-	count := map[string]int{}
-	for _, e := range entries {
-		for _, name := range m.Partners(e.VideoID, e.Title) { // each name once per stream
-			count[name]++
+	st := msg.RecapStream{
+		Title:    e.Title,
+		URL:      "https://www.youtube.com/watch?v=" + e.VideoID,
+		Start:    start.In(WIB),
+		Duration: e.Duration(),
+	}
+	var who []string
+	if partners != nil {
+		who = partners.Partners(e.VideoID, e.Title)
+		st.With = partners.Summary(who)
+	}
+	return st, who
+}
+
+// streamWho is a stream's start (in WIB) and who was in it.
+type streamWho struct {
+	start time.Time
+	names []string
+}
+
+// countCollabs counts, for every partner who was in a stream, the streams they were in and on which days. The streams must be oldest first, so the days come out in order. Most streams first; a tie goes to the name that comes first alphabetically.
+func countCollabs(streams []streamWho) []msg.RecapCollab {
+	tally := map[string]*msg.RecapCollab{}
+	for _, s := range streams {
+		y, m, d := s.start.Date()
+		day := time.Date(y, m, d, 0, 0, 0, 0, WIB)
+		for _, name := range s.names { // each name once per stream
+			c := tally[name]
+			if c == nil {
+				c = &msg.RecapCollab{Name: name}
+				tally[name] = c
+			}
+			c.Streams++
+			if n := len(c.Days); n == 0 || !c.Days[n-1].Equal(day) {
+				c.Days = append(c.Days, day) // two streams on one day: the day once
+			}
 		}
 	}
 	var out []msg.RecapCollab
-	for name, n := range count {
-		out = append(out, msg.RecapCollab{Name: name, Streams: n})
+	for _, c := range tally {
+		out = append(out, *c)
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Streams != out[j].Streams {

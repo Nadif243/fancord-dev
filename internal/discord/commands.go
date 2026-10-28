@@ -31,6 +31,11 @@ type RecapPreviewer interface {
 	Preview(channelID string, weeksAgo int) error
 }
 
+// ReminderPreviewer posts this week's collab reminder into a channel and says how many streams it listed and how many the week has. *recap.Service satisfies it.
+type ReminderPreviewer interface {
+	PreviewReminder(channelID string) (pending, total int, err error)
+}
+
 // CollabTagger lets people say who was in a stream. *collabs.Service satisfies it.
 type CollabTagger interface {
 	Recent(query string, n int) []collabs.StreamRef
@@ -45,6 +50,7 @@ type Deps struct {
 	Source           StreamSource         // nil when no YouTube key is configured
 	YouTubeChannelID string               // her channel, the default for /devcheck
 	Recap            RecapPreviewer       // nil when the recap is off
+	Reminder         ReminderPreviewer    // nil when the reminder is off
 	Collab           CollabTagger         // nil when the recap is off
 }
 
@@ -113,6 +119,12 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 			Required:    false,
 		}},
 	}, r.handleDevRecap)
+
+	// /devremind posts this week's collab reminder here, without waiting for Saturday.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "devremind",
+		Description: msg.DevRemindDescription,
+	}, r.handleDevRemind)
 
 	// /collab says who was in a stream with her. Her titles often do not say, so people who watched (or who ask on Saturday) tag it by hand. All three options offer a list while typing; see collabChoices.
 	r.add(&discordgo.ApplicationCommand{
@@ -320,6 +332,25 @@ func (r *Router) handleDevRecap(s *discordgo.Session, i *discordgo.InteractionCr
 	return reply(s, i, msg.DevRecapSent)
 }
 
+// handleDevRemind posts this week's collab reminder into this channel.
+func (r *Router) handleDevRemind(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if i.ChannelID != r.deps.DevChannelID {
+		return reply(s, i, msg.DevOnly)
+	}
+	if r.deps.Reminder == nil {
+		return reply(s, i, msg.DevRemindOff)
+	}
+	pending, total, err := r.deps.Reminder.PreviewReminder(i.ChannelID)
+	if err != nil {
+		_ = reply(s, i, msg.CommandFailed)
+		return fmt.Errorf("preview reminder: %w", err)
+	}
+	if pending == 0 {
+		return reply(s, i, msg.CollabReminderNone(total))
+	}
+	return reply(s, i, msg.DevRemindSent)
+}
+
 // maxChoices is the most options Discord lets an autocomplete list hold.
 const maxChoices = 25
 
@@ -352,7 +383,7 @@ func streamChoices(refs []collabs.StreamRef) []*discordgo.ApplicationCommandOpti
 			break
 		}
 		out = append(out, &discordgo.ApplicationCommandOptionChoice{
-			Name:  msg.CollabStreamLabel(ref.Start, ref.Title, len(ref.Partners) > 0),
+			Name:  msg.CollabStreamLabel(ref.Start, ref.Title, len(ref.Partners) > 0, ref.Checked),
 			Value: ref.ID,
 		})
 	}

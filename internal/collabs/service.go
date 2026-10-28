@@ -63,6 +63,7 @@ type StreamRef struct {
 	Start    time.Time
 	Live     bool
 	Partners []string // who is tagged right now
+	Checked  bool     // a person has confirmed who was in it
 }
 
 func (s *Service) ref(e history.Entry) StreamRef {
@@ -70,7 +71,7 @@ func (s *Service) ref(e history.Entry) StreamRef {
 	if start.IsZero() {
 		start = e.End
 	}
-	return StreamRef{ID: e.VideoID, Title: e.Title, Start: start, Live: e.State == "live", Partners: s.Partners(e.VideoID, e.Title)}
+	return StreamRef{ID: e.VideoID, Title: e.Title, Start: start, Live: e.State == "live", Partners: s.Partners(e.VideoID, e.Title), Checked: s.tags.Checked(e.VideoID)}
 }
 
 // recentPool is how far back the search looks: well past a week of streams.
@@ -100,12 +101,18 @@ type Outcome struct {
 	Removed []string  // Change: partners who were in the stream before but are not now
 }
 
+// Checked reports whether a person has confirmed who was in the stream.
+func (s *Service) Checked(videoID string) bool { return s.tags.Checked(videoID) }
+
+// Summary shortens a list of partners for reading: a full team is named once.
+func (s *Service) Summary(names []string) []string { return s.book.Summary(names) }
+
 // Suggest lists partners and teams matching what a person has typed so far, for autocomplete.
 func (s *Service) Suggest(typed string, n int) []partners.Suggestion {
 	return s.book.Suggest(typed, n)
 }
 
-// Change is the /collab command: it adds some people to a stream and takes some off, in one step. Both texts are checked first; if any name is not recognised nothing is changed. Someone named in both ends up removed.
+// Change is the /collab command: it adds some people to a stream and takes some off, in one step, and marks the stream as checked. Both texts are checked first; if any name is not recognised nothing is changed. Someone named in both ends up removed.
 // With both texts empty it changes nothing and just reports the stream.
 func (s *Service) Change(videoID, add, remove string) (Outcome, error) {
 	e, ok := s.streams.Get(videoID)
@@ -121,7 +128,8 @@ func (s *Service) Change(videoID, add, remove string) (Outcome, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	before := s.Partners(e.VideoID, e.Title)
-	var saveErr error
+	// Any /collab on a stream, even with nothing added, means "I looked".
+	saveErr := s.tags.Check(videoID)
 	if len(toAdd) > 0 {
 		saveErr = errors.Join(saveErr, s.tags.Add(videoID, toAdd))
 	}

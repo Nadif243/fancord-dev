@@ -118,12 +118,15 @@ func run(log *slog.Logger) error {
 		// The recap and /collab both go through this one service.
 		who := collabs.NewService(book, tags, streams)
 		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log).
-			WithPartners(who, cfg.Channels.Ops)
+			WithPartners(who, cfg.Channels.Ops).
+			WithReminder(cfg.Channels.Test, memory)
 		collab = who
 	}
-	var preview discord.RecapPreviewer // stays a nil interface when the recap is off
+	var preview discord.RecapPreviewer          // stays a nil interface when the recap is off
+	var remindPreview discord.ReminderPreviewer // same for the reminder
 	if recapService != nil {
 		preview = recapService
+		remindPreview = recapService
 	}
 
 	router := discord.NewRouter(log, discord.Deps{
@@ -132,6 +135,7 @@ func run(log *slog.Logger) error {
 		Source:           source,
 		YouTubeChannelID: cfg.YouTube.ChannelID,
 		Recap:            preview,
+		Reminder:         remindPreview,
 		Collab:           collab,
 	})
 	s.AddHandler(router.OnInteraction)

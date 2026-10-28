@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/history"
@@ -27,6 +28,12 @@ type Marker interface {
 	SetLastRecap(time.Time) error
 }
 
+// ReminderMarker does the same for the Saturday reminder. *store.File satisfies it.
+type ReminderMarker interface {
+	LastReminder() time.Time
+	SetLastReminder(time.Time) error
+}
+
 const (
 	checkEvery = time.Minute
 	// A recap that is more than this late (the bot was off all Sunday night and the next day) is skipped, not posted as stale news.
@@ -45,6 +52,9 @@ type Service struct {
 
 	partners Matcher // nil: no collab line
 	opsID    string  // where the "unknown handles" note goes; empty: no note
+
+	remindID string         // where the Saturday reminder goes; empty: no reminder
+	remarker ReminderMarker // remembers the last reminder handled
 }
 
 // New makes a Service. settle should be a little longer than the poll interval: the stream that ended just before the deadline has to be seen as ended by the poller before the recap counts it.
@@ -52,12 +62,17 @@ func New(src Source, send Sender, marker Marker, channelID string, settle time.D
 	return &Service{src: src, send: send, marker: marker, channelID: channelID, settle: settle, log: log, now: time.Now}
 }
 
-// WithPartners turns on the collab line. A note about @handles that are not in
-// the partner list is sent to opsChannelID after each weekly recap (and to the
-// channel of a /devrecap preview). Either may be empty.
+// WithPartners turns on the collab line. A note about @handles that are not in the partner list is sent to opsChannelID after each weekly recap (and to the channel of a /devrecap preview). Either may be empty.
 func (s *Service) WithPartners(m Matcher, opsChannelID string) *Service {
 	s.partners = m
 	s.opsID = opsChannelID
+	return s
+}
+
+// WithReminder turns on the Saturday reminder: streams of the week whose collabs nobody has checked are listed in channelID (the dev channel) at Saturday 12:00 WIB. It needs WithPartners, because "checked" lives there.
+func (s *Service) WithReminder(channelID string, m ReminderMarker) *Service {
+	s.remindID = channelID
+	s.remarker = m
 	return s
 }
 
@@ -78,6 +93,11 @@ func (s *Service) Run(ctx context.Context) {
 }
 
 func (s *Service) tick() {
+	s.remind()
+	s.tickRecap()
+}
+
+func (s *Service) tickRecap() {
 	now := s.now()
 	due := LastDue(now)
 	done := s.marker.LastRecap()
@@ -147,6 +167,68 @@ func (s *Service) remember(due time.Time) {
 		// Kept in memory for this run; only a restart could repeat the recap.
 		s.log.Error("could not save which recap was posted", "err", err)
 	}
+}
+
+// remind posts the Saturday reminder when it is due.
+func (s *Service) remind() {
+	if s.remindID == "" || s.remarker == nil || s.partners == nil {
+		return
+	}
+	now := s.now()
+	due, recapDue := ReminderDue(now)
+	if !s.remarker.LastReminder().Before(due) {
+		return // this week's reminder is already handled
+	}
+	if now.Sub(due) > remindGrace {
+		s.log.Warn("the bot was off when the reminder was due; skipping it", "due", due)
+		s.rememberReminder(due)
+		return
+	}
+	texts, pending, _ := s.reminder(recapDue)
+	if pending == 0 {
+		s.rememberReminder(due) // nothing to check: stay quiet
+		return
+	}
+	if err := s.post(s.remindID, texts, func() { s.rememberReminder(due) }); err != nil {
+		s.log.Error("could not post the collab reminder; will try again", "err", err)
+	}
+}
+
+// reminder builds the messages for the week that ends with the recap at recapDue: the streams so far whose collabs are not checked. pending is how many that is, total how many streams the week has so far.
+func (s *Service) reminder(recapDue time.Time) (texts []string, pending, total int) {
+	entries := s.src.Ended(recapDue.Add(-window), recapDue)
+	var streams []msg.RecapStream
+	for _, e := range entries {
+		if s.partners.Checked(e.VideoID) {
+			continue
+		}
+		st, _ := streamOf(e, s.partners)
+		streams = append(streams, st)
+	}
+	sort.SliceStable(streams, func(i, j int) bool { return streams[i].Start.Before(streams[j].Start) })
+	if len(streams) == 0 {
+		return nil, 0, len(entries)
+	}
+	return msg.CollabReminder(len(entries), streams), len(streams), len(entries)
+}
+
+func (s *Service) rememberReminder(due time.Time) {
+	if err := s.remarker.SetLastReminder(due); err != nil {
+		s.log.Error("could not save which reminder was posted", "err", err)
+	}
+}
+
+// PreviewReminder posts this week's reminder to channelID right now, without touching the "already posted" memory. It says how many streams were listed and how many the week has so far; nothing is posted when none is listed.
+func (s *Service) PreviewReminder(channelID string) (pending, total int, err error) {
+	if s.partners == nil {
+		return 0, 0, errors.New("the reminder needs the partner matching")
+	}
+	_, recapDue := ReminderDue(s.now())
+	texts, pending, total := s.reminder(recapDue)
+	if pending == 0 {
+		return 0, total, nil
+	}
+	return pending, total, s.post(channelID, texts, nil)
 }
 
 // Preview posts the recap of a past week to channelID without touching the "already posted" memory. weeksAgo 0 is the most recent complete week.

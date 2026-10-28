@@ -23,6 +23,9 @@ const formatVersion = 1
 type tags struct {
 	Added   []string `json:"added,omitempty"`
 	Removed []string `json:"removed,omitempty"`
+	// Checked says a person has looked at who was in this stream (even if the
+	// answer was "nobody"). The Saturday reminder lists streams that are not.
+	Checked bool `json:"checked,omitempty"`
 }
 
 type fileData struct {
@@ -70,6 +73,26 @@ func (f *File) Get(videoID string) (added, removed []string) {
 	defer f.mu.Unlock()
 	t := f.data.Streams[videoID]
 	return slices.Clone(t.Added), slices.Clone(t.Removed)
+}
+
+// Checked reports whether a person has confirmed who was in the stream.
+func (f *File) Checked(videoID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.Streams[videoID].Checked
+}
+
+// Check records that a person has looked at the stream. Saving happens only the first time.
+func (f *File) Check(videoID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	t := f.data.Streams[videoID]
+	if t.Checked {
+		return nil
+	}
+	t.Checked = true
+	f.data.Streams[videoID] = t
+	return f.save()
 }
 
 // Add records that these partners were in the stream. A partner who was removed earlier is back.

@@ -124,6 +124,7 @@ type RecapStream struct {
 	URL      string
 	Start    time.Time
 	Duration time.Duration // 0 when unknown
+	With     []string      // who was in it, already shortened (a full team is one name)
 }
 
 // RecapDay is one calendar day (WIB) of the week.
@@ -137,6 +138,7 @@ type RecapDay struct {
 type RecapCollab struct {
 	Name    string
 	Streams int
+	Days    []time.Time // the days (WIB) of those streams, oldest first, each once
 }
 
 // RecapWeek is everything the recap says. The recap package fills it in; this package only decides how it reads. A nil Longest or Busiest means the line is left out because it would add nothing (one stream, or one day).
@@ -191,14 +193,22 @@ func Recap(w RecapWeek) []string {
 	}
 	b.WriteString("\n\n**Daftar stream**")
 
-	// Fill messages line by line; a line is never cut in half.
+	lines := make([]string, len(w.Streams))
+	for i, st := range w.Streams {
+		lines[i] = recapLine(st)
+	}
+	return splitLines(b.String(), lines)
+}
+
+// splitLines puts the head and then the lines into messages that each fit in Discord. A line is never cut in half, and a continuation message does not start with a blank line.
+func splitLines(head string, lines []string) []string {
 	out := []string{}
-	cur := b.String()
-	for _, st := range w.Streams {
-		line := "\n" + recapLine(st)
+	cur := head
+	for _, l := range lines {
+		line := "\n" + l
 		if utf8.RuneCountInString(cur)+utf8.RuneCountInString(line) > recapMaxLen {
 			out = append(out, cur)
-			cur = strings.TrimPrefix(line, "\n")
+			cur = l
 			continue
 		}
 		cur += line
@@ -222,12 +232,24 @@ func recapWatch(st RecapStream) string {
 // recapMaxCollabs keeps the summary short in a week with many guests.
 const recapMaxCollabs = 10
 
+// dayList reads like "; Min, Jum", or nothing when no days are known.
+func dayList(days []time.Time) string {
+	if len(days) == 0 {
+		return ""
+	}
+	names := make([]string, len(days))
+	for i, d := range days {
+		names[i] = dayNames[d.Weekday()][:3]
+	}
+	return "; " + strings.Join(names, ", ")
+}
+
 // collabList reads like "@A (3×), @B (1×) dan 4 lainnya".
 func collabList(collabs []RecapCollab) string {
 	shown := collabs[:min(len(collabs), recapMaxCollabs)]
 	parts := make([]string, len(shown))
 	for i, c := range shown {
-		parts[i] = fmt.Sprintf("%s (%d×)", escape(shorten(c.Name, 40)), c.Streams)
+		parts[i] = fmt.Sprintf("%s (%d×%s)", escape(shorten(c.Name, 40)), c.Streams, dayList(c.Days))
 	}
 	out := strings.Join(parts, ", ")
 	if rest := len(collabs) - len(shown); rest > 0 {
@@ -240,6 +262,9 @@ func recapLine(st RecapStream) string {
 	line := fmt.Sprintf("• %s %s · %s", dayNames[st.Start.Weekday()][:3], shortDate(st.Start), recapTitle(st))
 	if st.Duration > 0 {
 		line += " · " + duration(st.Duration)
+	}
+	if len(st.With) > 0 {
+		line += " · bareng " + escapeAll(st.With)
 	}
 	return line + recapWatch(st)
 }
@@ -312,11 +337,14 @@ func dateLabel(t time.Time) string {
 	return dayNames[t.Weekday()][:3] + " " + shortDate(t)
 }
 
-// CollabStreamLabel is one line in the list of streams that appears while typing /collab. It is plain text (Discord does not format these labels), at most 100 characters, with a 🤝 when somebody is already tagged.
-func CollabStreamLabel(start time.Time, title string, tagged bool) string {
+// CollabStreamLabel is one line in the list of streams that appears while typing /collab. It is plain text (Discord does not format these labels), at most 100 characters, with a 🤝 when somebody is already tagged  and a ✅ when a person has checked the stream.
+func CollabStreamLabel(start time.Time, title string, tagged, checked bool) string {
 	label := dateLabel(start) + " · " + strings.Join(strings.Fields(title), " ")
 	if tagged {
 		label = "🤝 " + label
+	}
+	if checked {
+		label = "✅ " + label
 	}
 	return shorten(label, 100)
 }
@@ -347,11 +375,39 @@ func CollabDone(title string, start time.Time, partners, added, removed []string
 	if len(added) == 0 && len(removed) == 0 {
 		b.WriteString("\nNo change.")
 	}
+	b.WriteString("\n✅ Checked")
 	if by != "" {
-		b.WriteString("\nUpdated by " + escape(by))
+		b.WriteString(" by " + escape(by))
 	}
 	return b.String()
 }
+
+// CollabReminder is the Saturday message (English, dev channel): the streams of this week that nobody has checked yet, each with who the bot has tagged so far (after "bareng") and a link to watch. total is all of the week's streams. It is split into several messages when it is long.
+func CollabReminder(total int, streams []RecapStream) []string {
+	head := fmt.Sprintf("📝 **Collab check** · %d of %d streams this week have not been checked yet. The recap is posted on Sunday at 20:00 WIB.\n"+
+		"Run `/collab` on each: add who was there, take off who was not, or run it with nothing added if the line below is right as it is. "+
+		"\"bareng …\" is who the bot has tagged so far.\n", len(streams), total)
+	lines := make([]string, len(streams))
+	for i, st := range streams {
+		lines[i] = recapLine(st)
+	}
+	return splitLines(head, lines)
+}
+
+// CollabReminderNone answers /devremind when there is nothing to check.
+func CollabReminderNone(total int) string {
+	if total == 0 {
+		return "Nothing to check: no stream has ended since the last recap."
+	}
+	return fmt.Sprintf("Nothing to check: all %d streams since the last recap are checked. ✅", total)
+}
+
+// DevRemindDescription and friends are the texts of /devremind.
+const (
+	DevRemindDescription = "Post the collab reminder for this week now (dev only)"
+	DevRemindSent        = "Reminder posted."
+	DevRemindOff         = "The reminder is off. It needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID in .env."
+)
 
 // CollabUnknown answers /collab when some typed names are not on the list.
 func CollabUnknown(unknown []string) string {

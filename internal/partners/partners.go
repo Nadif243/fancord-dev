@@ -23,6 +23,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -315,6 +316,52 @@ func (b *Book) inFileOrder(set map[string]bool) []string {
 		}
 	}
 	return out
+}
+
+// Summary shortens a list of partners for reading: a team whose members are all in the list is named once, and the others keep their own names ("Squad Kocak, @DinaMostarterra"). A bigger team is named before a smaller one, and a team whose members are already covered by another is left out. Teams come first, then the remaining people in the order they were given.
+func (b *Book) Summary(names []string) []string {
+	if b == nil {
+		return append([]string(nil), names...)
+	}
+	present := map[string]bool{}
+	for _, n := range names {
+		present[n] = true
+	}
+	var teams []entry
+	for _, e := range b.entries {
+		if e.kind == kindGroup && allIn(e.members, present) {
+			teams = append(teams, e)
+		}
+	}
+	sort.SliceStable(teams, func(i, j int) bool { return len(teams[i].members) > len(teams[j].members) })
+
+	covered := map[string]bool{}
+	var out []string
+	for _, g := range teams {
+		if allIn(g.members, covered) {
+			continue // everyone in it is already named through a bigger team
+		}
+		out = append(out, g.name)
+		for _, m := range g.members {
+			covered[m] = true
+		}
+	}
+	for _, n := range names {
+		if !covered[n] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// allIn reports whether every name is in the set (an empty list is not "all").
+func allIn(names []string, set map[string]bool) bool {
+	for _, n := range names {
+		if !set[n] {
+			return false
+		}
+	}
+	return len(names) > 0
 }
 
 // Suggestion is a partner or a group that can be typed in /collab.

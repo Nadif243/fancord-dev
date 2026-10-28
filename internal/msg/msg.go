@@ -382,11 +382,11 @@ func CollabDone(title string, start time.Time, partners, added, removed []string
 	return b.String()
 }
 
-// CollabReminder is the Saturday message (English, dev channel): the streams of this week that nobody has checked yet, each with who the bot has tagged so far (after "bareng") and a link to watch. total is all of the week's streams. It is split into several messages when it is long.
-func CollabReminder(total int, streams []RecapStream) []string {
-	head := fmt.Sprintf("📝 **Collab check** · %d of %d streams this week have not been checked yet. The recap is posted on Sunday at 20:00 WIB.\n"+
+// CollabReminder is the Saturday message (English, dev channel): the streams of the week from..to (the one the next recap covers) that nobody has checked yet, each with who the bot has tagged so far (after "bareng") and a link to watch. total is all of that week's streams so far. It is split into several messages when it is long.
+func CollabReminder(from, to time.Time, total int, streams []RecapStream) []string {
+	head := fmt.Sprintf("📝 **Collab check** · %s – %s · %d of %d streams have not been checked yet. The recap is posted on Sunday at 20:00 WIB.\n"+
 		"Run `/collab` on each: add who was there, take off who was not, or run it with nothing added if the line below is right as it is. "+
-		"\"bareng …\" is who the bot has tagged so far.\n", len(streams), total)
+		"\"bareng …\" is who the bot has tagged so far.\n", shortDate(from.In(zoneWIB)), shortDate(to.In(zoneWIB)), len(streams), total)
 	lines := make([]string, len(streams))
 	for i, st := range streams {
 		lines[i] = recapLine(st)

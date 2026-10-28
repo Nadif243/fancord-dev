@@ -209,7 +209,7 @@ func (s *Service) reminder(recapDue time.Time) (texts []string, pending, total i
 	if len(streams) == 0 {
 		return nil, 0, len(entries)
 	}
-	return msg.CollabReminder(len(entries), streams), len(streams), len(entries)
+	return msg.CollabReminder(recapDue.Add(-window), recapDue, len(entries), streams), len(streams), len(entries)
 }
 
 func (s *Service) rememberReminder(due time.Time) {
@@ -218,13 +218,13 @@ func (s *Service) rememberReminder(due time.Time) {
 	}
 }
 
-// PreviewReminder posts this week's reminder to channelID right now, without touching the "already posted" memory. It says how many streams were listed and how many the week has so far; nothing is posted when none is listed.
+// PreviewReminder posts the reminder for the week in progress (the one the next recap will cover) to channelID right now, without touching the "already posted" memory. It says how many streams were listed and how many the week has so far; nothing is posted when none is listed.
 func (s *Service) PreviewReminder(channelID string) (pending, total int, err error) {
 	if s.partners == nil {
 		return 0, 0, errors.New("the reminder needs the partner matching")
 	}
-	_, recapDue := ReminderDue(s.now())
-	texts, pending, total := s.reminder(recapDue)
+	// Not ReminderDue: before Saturday noon that still points at the week that is over, but a preview should show the week people are checking now.
+	texts, pending, total := s.reminder(NextDue(s.now()))
 	if pending == 0 {
 		return 0, total, nil
 	}

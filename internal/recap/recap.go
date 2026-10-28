@@ -39,6 +39,9 @@ func ReminderDue(now time.Time) (remind, recapDue time.Time) {
 	return remind, recapDue
 }
 
+// NextDue is the recap that is coming up: the one that will cover the week in progress. A reminder or its preview is always about this one.
+func NextDue(now time.Time) time.Time { return LastDue(now).AddDate(0, 0, 7) }
+
 // LastDue is the most recent recap moment at or before now: the latest Sunday 20:00 WIB.
 func LastDue(now time.Time) time.Time {
 	t := now.In(WIB)

@@ -1,0 +1,36 @@
+# Run the bot:        docker compose up -d --build
+# Watch what it says: docker compose logs -f
+# Stop it:            docker compose down
+
+services:
+  bot:
+    build:
+      context: .
+      args:
+        VERSION: ${BOT_VERSION:-0.1.0-docker}
+    image: fancord-bot:local
+    container_name: fancord-bot
+
+    # Start again after a crash or a reboot, unless I stopped it myself.
+    restart: unless-stopped
+
+    # Gives the bot everything in .env (token, API key, channel IDs) as environment variables. The file stays on this PC and is not in the image.
+    env_file: .env
+    environment:
+      TZ: Asia/Jakarta
+
+    volumes:
+      # The bot's memory (history, collab tags, what was announced). It lives on this PC, so it survives rebuilding or deleting the container.
+      - ./data:/app/data
+      # The partner list, read-only. Edit it on this PC, then run `docker compose restart` (the bot reads it once at start).
+      - ./partners.csv:/app/partners.csv:ro
+
+    # On stop the bot first marks its heartbeat message Offline. Give it time.
+    stop_grace_period: 20s
+
+    # Without this, the logs grow forever. Keep three files of 10 MB at most.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

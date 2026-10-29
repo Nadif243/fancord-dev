@@ -1,0 +1,13 @@
+# Keep these out of the build: secrets, state, and things the image never needs.
+.env
+.env.*
+data/
+bin/
+*.exe
+*.zip
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+.dockerignore
+README.md

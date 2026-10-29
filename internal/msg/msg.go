@@ -402,6 +402,46 @@ func CollabReminderNone(total int) string {
 	return fmt.Sprintf("Nothing to check: all %d streams since the last recap are checked. ✅", total)
 }
 
+// MissedStream is a stream that ended while the bot was off.
+type MissedStream struct {
+	Stream    RecapStream
+	Announced bool // it had been announced earlier, and its message is now updated
+}
+
+// BackOnline is the note (English, ops channel) the bot posts when it starts again after being off: for how long, and which streams ended meanwhile. The streams are in the history and count in the recap, but one that was never announced got no message in the announcement channel. Long lists are split into several messages.
+func BackOnline(offSince, now time.Time, missed []MissedStream) []string {
+	head := fmt.Sprintf("🔄 **Back online** · off for %s, since %s.", offFor(now.Sub(offSince)), clockLabel(offSince))
+	if len(missed) == 0 {
+		return []string{head + "\nNo stream ended meanwhile."}
+	}
+	noun := "streams"
+	if len(missed) == 1 {
+		noun = "stream"
+	}
+	head += fmt.Sprintf("\n%d %s ended while the bot was off. They are in the history and count in the recap; one marked \"not announced\" got no message in the announcement channel.\n", len(missed), noun)
+	lines := make([]string, len(missed))
+	for i, m := range missed {
+		lines[i] = recapLine(m.Stream)
+		if !m.Announced {
+			lines[i] += " · *not announced*"
+		}
+	}
+	return splitLines(head, lines)
+}
+
+// offFor says how long the bot was off, to the minute.
+func offFor(d time.Duration) string {
+	if d < time.Minute {
+		return "less than a minute"
+	}
+	return duration(d.Round(time.Minute))
+}
+
+// clockLabel is a day and a time of day in WIB, like "Kam 29 Okt 03:41 WIB".
+func clockLabel(t time.Time) string {
+	return dateLabel(t) + " " + t.In(zoneWIB).Format("15:04") + " WIB"
+}
+
 // DevRemindDescription and friends are the texts of /devremind.
 const (
 	DevRemindDescription = "Post the collab reminder for this week now (dev only)"

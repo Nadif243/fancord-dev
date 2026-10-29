@@ -46,6 +46,7 @@ type Poller struct {
 	now       func() time.Time // a field so tests can set the clock
 
 	// Only the goroutine running Run touches these, so they need no lock.
+	first   func()          // runs once, after the first check that worked; may be nil
 	checked bool            // has one check succeeded yet?
 	warned  map[string]bool // notes already logged, so they are not repeated every time
 }
@@ -56,6 +57,12 @@ func New(source Source, announcer Announcer, recorder Recorder, channelID string
 		every: every, log: log, now: time.Now,
 		warned: map[string]bool{},
 	}
+}
+
+// OnFirstCheck registers a function that runs once, right after the first check that worked (when the history and the announcements are up to date with what happened while the bot was off).
+func (p *Poller) OnFirstCheck(f func()) *Poller {
+	p.first = f
+	return p
 }
 
 // Run checks right away (so a restart does not wait a whole interval), then once per interval, until ctx is cancelled.
@@ -115,6 +122,9 @@ func (p *Poller) check(parent context.Context) {
 		p.checked = true
 		p.log.Info("first youtube check done",
 			"videos", scan.Checked, "streams", len(scan.Streams), "passed_on", passed, "every", p.every)
+		if p.first != nil {
+			p.first()
+		}
 	} else {
 		p.log.Debug("youtube check done", "videos", scan.Checked, "streams", len(scan.Streams), "passed_on", passed)
 	}

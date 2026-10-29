@@ -17,6 +17,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
+	"github.com/Nadif243/fancord-bot/internal/catchup"
 	"github.com/Nadif243/fancord-bot/internal/collabs"
 	"github.com/Nadif243/fancord-bot/internal/config"
 	"github.com/Nadif243/fancord-bot/internal/discord"
@@ -178,7 +179,11 @@ func run(log *slog.Logger) error {
 	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)
 
 	if pollerOn {
-		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).Run)
+		// Writes down "still running" every few minutes; after the first YouTube check of a start it tells the ops channel what happened while off.
+		back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log)
+		start(back.Run)
+		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
+			OnFirstCheck(back.FirstCheckDone).Run)
 		start(recapService.Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")

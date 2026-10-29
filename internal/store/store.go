@@ -34,6 +34,9 @@ type fileData struct {
 
 	// LastReminder is the moment of the last Saturday collab reminder that was handled, so a restart does not post it twice.
 	LastReminder time.Time `json:"lastReminder"`
+
+	// LastAlive is the last moment the bot was seen running (written every few minutes and when it stops). At the next start it says how long the bot was off.
+	LastAlive time.Time `json:"lastAlive"`
 }
 
 // File is a broadcast.Memory backed by one JSON file. The whole file is rewritten on every change, which is fine at this size (a few hundred streams a year).
@@ -70,6 +73,7 @@ func Open(path string) (*File, error) {
 	}
 	f.data.LastRecap = d.LastRecap
 	f.data.LastReminder = d.LastReminder
+	f.data.LastAlive = d.LastAlive
 	return f, nil
 }
 
@@ -107,6 +111,21 @@ func (f *File) SetLastReminder(t time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.data.LastReminder = t.UTC()
+	return f.save()
+}
+
+// LastAlive is the last moment the bot was seen running; the zero time on the first run.
+func (f *File) LastAlive() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.LastAlive
+}
+
+// SetLastAlive remembers that the bot is running at t. As with the other markers, the value is kept for this run even if saving fails.
+func (f *File) SetLastAlive(t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.data.LastAlive = t.UTC()
 	return f.save()
 }
 

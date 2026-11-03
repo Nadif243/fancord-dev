@@ -6,6 +6,7 @@ package config
 import (
 	"errors"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,11 @@ const (
 	defaultHistoryFile      = "data/history.json"
 	defaultPartnersFile     = "partners.csv"
 	defaultCollabFile       = "data/collabs.json"
+	defaultXUsername        = "YozakuraYuura"
+	defaultXPollSeconds     = 300
+	minXPollSeconds         = 60
+	defaultXMonthlyCap      = 250
+	minXMonthlyCap          = 10
 	defaultPollSeconds      = 120
 	minPollSeconds          = 30
 	defaultHeartbeatSeconds = 60
@@ -35,6 +41,16 @@ type Channels struct {
 	Announce string // stream and tweet announcements
 	Approval string // mod approval queue
 	Recap    string // the weekly recap; the announcement channel when not set
+	Tweets   string // her X posts; the announcement channel when not set
+}
+
+// X holds the settings for relaying her X posts. Without a token the relay is simply off.
+type X struct {
+	BearerToken string        // secret
+	Username    string        // her handle, without the @
+	PollEvery   time.Duration // how often X is checked
+	Kinds       []string      // post types to relay: post, reply, quote, repost
+	MonthlyCap  int           // billed reads per month before the relay pauses
 }
 
 // YouTube holds the settings for reading her channel. Both are optional, so the bot still starts without them; the commands that need them say so.
@@ -61,6 +77,7 @@ type Config struct {
 	Channels       Channels
 	Pings          Pings
 	YouTube        YouTube
+	X              X
 	HeartbeatEvery time.Duration
 }
 
@@ -104,6 +121,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
 	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
 	c.Channels.Recap = optionalID("CHANNEL_RECAP", c.Channels.Announce)
+	c.Channels.Tweets = optionalID("CHANNEL_TWEETS", c.Channels.Announce)
 	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 
@@ -126,6 +144,8 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
+
+	c.X = loadX(get, &problems)
 
 	c.PartnersFile = get("PARTNERS_FILE")
 	if c.PartnersFile == "" {
@@ -162,6 +182,64 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("invalid configuration:\n  - " + strings.Join(problems, "\n  - "))
 	}
 	return c, nil
+}
+
+// An X handle is 1 to 15 letters, digits or underscores.
+var xUsername = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
+
+// RelayKinds are the post types the relay can pass on, in the order they are listed by default.
+var RelayKinds = []string{"post", "reply", "quote", "repost"}
+
+// loadX reads the X settings. The token is never repeated in an error message.
+func loadX(get func(string) string, problems *[]string) X {
+	x := X{BearerToken: get("X_BEARER_TOKEN"), Username: defaultXUsername, MonthlyCap: defaultXMonthlyCap}
+
+	if v := strings.TrimPrefix(get("X_USERNAME"), "@"); v != "" {
+		if !xUsername.MatchString(v) {
+			*problems = append(*problems, "X_USERNAME must be an X handle (letters, digits and _, up to 15), got "+quote(v))
+		} else {
+			x.Username = v
+		}
+	}
+
+	secs := defaultXPollSeconds
+	if v := get("X_POLL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minXPollSeconds {
+			*problems = append(*problems, "X_POLL_SECONDS must be a whole number of "+strconv.Itoa(minXPollSeconds)+" or more, got "+quote(v))
+		} else {
+			secs = n
+		}
+	}
+	x.PollEvery = time.Duration(secs) * time.Second
+
+	if v := get("X_MONTHLY_READ_CAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minXMonthlyCap {
+			*problems = append(*problems, "X_MONTHLY_READ_CAP must be a whole number of "+strconv.Itoa(minXMonthlyCap)+" or more, got "+quote(v))
+		} else {
+			x.MonthlyCap = n
+		}
+	}
+
+	x.Kinds = RelayKinds
+	if v := get("X_RELAY_TYPES"); v != "" {
+		x.Kinds = nil
+		for _, k := range strings.Split(v, ",") {
+			k = strings.ToLower(strings.TrimSpace(k))
+			switch {
+			case k == "":
+			case !slices.Contains(RelayKinds, k):
+				*problems = append(*problems, "X_RELAY_TYPES has an unknown type "+quote(k)+" (use post, reply, quote, repost)")
+			case !slices.Contains(x.Kinds, k):
+				x.Kinds = append(x.Kinds, k)
+			}
+		}
+		if len(x.Kinds) == 0 && len(*problems) == 0 {
+			*problems = append(*problems, "X_RELAY_TYPES is empty; list at least one of post, reply, quote, repost")
+		}
+	}
+	return x
 }
 
 func quote(s string) string {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
+	"github.com/Nadif243/fancord-bot/internal/relay"
 )
 
 // formatVersion lets a future version of the bot recognise an old file.
@@ -37,6 +38,9 @@ type fileData struct {
 
 	// LastAlive is the last moment the bot was seen running (written every few minutes and when it stops). At the next start it says how long the bot was off.
 	LastAlive time.Time `json:"lastAlive"`
+
+	// Relay is what the tweet relay remembers (the newest post handled, the read count for the month, the YouTube links seen).
+	Relay relay.State `json:"relay"`
 }
 
 // File is a broadcast.Memory backed by one JSON file. The whole file is rewritten on every change, which is fine at this size (a few hundred streams a year).
@@ -74,6 +78,7 @@ func Open(path string) (*File, error) {
 	f.data.LastRecap = d.LastRecap
 	f.data.LastReminder = d.LastReminder
 	f.data.LastAlive = d.LastAlive
+	f.data.Relay = d.Relay
 	return f, nil
 }
 
@@ -126,6 +131,24 @@ func (f *File) SetLastAlive(t time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.data.LastAlive = t.UTC()
+	return f.save()
+}
+
+// Relay is what the tweet relay remembered. The returned value is a copy.
+func (f *File) Relay() relay.State {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.data.Relay
+	st.Links = append([]relay.Link(nil), st.Links...)
+	return st
+}
+
+// SetRelay remembers the tweet relay's state. As with the other markers, the value is kept for this run even if saving fails.
+func (f *File) SetRelay(st relay.State) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st.Links = append([]relay.Link(nil), st.Links...)
+	f.data.Relay = st
 	return f.save()
 }
 

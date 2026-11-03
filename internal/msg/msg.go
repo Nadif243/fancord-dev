@@ -442,6 +442,36 @@ func clockLabel(t time.Time) string {
 	return dateLabel(t) + " " + t.In(zoneWIB).Format("15:04") + " WIB"
 }
 
+// TweetRelay is the message for one of her X posts in the tweets channel (Indonesian, for fans). The link is plain so Discord shows its preview.
+// kind is "post", "reply", "quote" or "repost".
+func TweetRelay(kind, url string) string {
+	label := "🐦 **Tweet baru dari Yuura**"
+	switch kind {
+	case "reply":
+		label = "💬 **Yuura membalas**"
+	case "quote":
+		label = "💭 **Yuura mengutip**"
+	case "repost":
+		label = "🔁 **Yuura me-repost**"
+	}
+	return label + "\n" + url
+}
+
+// RelayFailing is the ops note (English) when the tweet relay keeps failing.
+func RelayFailing(failures int, err string) string {
+	return fmt.Sprintf("⚠️ **Tweet relay** · %d checks in a row have failed, so new tweets are not being relayed. It keeps trying; this note comes once.\nLast error: %s", failures, escape(shorten(err, 300)))
+}
+
+// RelayBudgetWarning is the ops note when most of the monthly X read cap is used.
+func RelayBudgetWarning(reads, cap int) string {
+	return fmt.Sprintf("💸 **Tweet relay** · %d of %d X reads used this month. It pauses at the cap and resumes next month; raise X_MONTHLY_READ_CAP to allow more.", reads, cap)
+}
+
+// RelayCapReached is the ops note when the relay pauses at the cap.
+func RelayCapReached(reads, cap int) string {
+	return fmt.Sprintf("⏸️ **Tweet relay paused** · %d of %d X reads used this month. Tweets are not relayed until next month. Raise X_MONTHLY_READ_CAP to continue now.", reads, cap)
+}
+
 // DevRemindDescription and friends are the texts of /devremind.
 const (
 	DevRemindDescription = "Post the collab reminder for this week now (dev only)"

@@ -26,7 +26,9 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/partners"
 	"github.com/Nadif243/fancord-bot/internal/poller"
 	"github.com/Nadif243/fancord-bot/internal/recap"
+	"github.com/Nadif243/fancord-bot/internal/relay"
 	"github.com/Nadif243/fancord-bot/internal/store"
+	"github.com/Nadif243/fancord-bot/internal/xapi"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
@@ -174,6 +176,24 @@ func run(log *slog.Logger) error {
 			defer wg.Done()
 			run(ctx)
 		}()
+	}
+
+	// The tweet relay needs only X and Discord, not the YouTube poller.
+	if cfg.X.BearerToken != "" {
+		kinds := make([]xapi.Kind, len(cfg.X.Kinds))
+		for i, k := range cfg.X.Kinds {
+			kinds[i] = xapi.Kind(k)
+		}
+		start(relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
+			Username:   cfg.X.Username,
+			ChannelID:  cfg.Channels.Tweets,
+			OpsID:      cfg.Channels.Ops,
+			Every:      cfg.X.PollEvery,
+			Kinds:      kinds,
+			MonthlyCap: cfg.X.MonthlyCap,
+		}, log).Run)
+	} else {
+		log.Info("tweet relay is off: set X_BEARER_TOKEN to turn it on")
 	}
 
 	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)

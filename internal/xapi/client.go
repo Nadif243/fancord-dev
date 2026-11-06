@@ -89,6 +89,41 @@ func (c *Client) Posts(ctx context.Context, userID, sinceID string) (Page, error
 	return page, err
 }
 
+// ErrNotFound means X answered, but has no such post (deleted, private, or a wrong ID). Such a lookup is not billed.
+var ErrNotFound = errors.New("x post not found")
+
+// Post looks one post up by its ID. A found post is one billed read; the original of a quote or repost comes along for free and its links are included, like in Posts.
+func (c *Client) Post(ctx context.Context, id string) (Post, error) {
+	p, err := c.post(ctx, id)
+	var se *statusError
+	if errors.As(err, &se) && se.status == http.StatusBadRequest && c.swapFieldsParam(se.message) {
+		return c.post(ctx, id)
+	}
+	return p, err
+}
+
+func (c *Client) post(ctx context.Context, id string) (Post, error) {
+	q := url.Values{}
+	q.Set(c.fieldsParam, "created_at,entities,referenced_tweets")
+	q.Set("expansions", "referenced_tweets.id")
+	var raw struct {
+		Data     *rawPost `json:"data"`
+		Includes struct {
+			Tweets []rawPost `json:"tweets"`
+			Posts  []rawPost `json:"posts"`
+		} `json:"includes"`
+	}
+	if err := c.get(ctx, "tweets/"+url.PathEscape(id), q, &raw); err != nil {
+		return Post{}, err
+	}
+	if raw.Data == nil || raw.Data.ID == "" {
+		return Post{}, ErrNotFound
+	}
+	r := response{Data: []rawPost{*raw.Data}}
+	r.Includes.Tweets, r.Includes.Posts = raw.Includes.Tweets, raw.Includes.Posts
+	return r.page().Posts[0], nil
+}
+
 // swapFieldsParam switches between "tweet.fields" and "post.fields" when X's error names the one in use. It reports whether it switched.
 func (c *Client) swapFieldsParam(message string) bool {
 	if !strings.Contains(message, c.fieldsParam) {

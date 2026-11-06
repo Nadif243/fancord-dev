@@ -100,6 +100,10 @@ type Service struct {
 	nextTry time.Time         // after a failed lookup: no lookups before this
 	wake    chan struct{}
 
+	x      PostSource             // nil: X posts that people send are not read
+	xCap   int                    // billed X reads allowed per month
+	recent map[string][]time.Time // when each person last sent links
+
 	announcer Announcer // nil: confirmed collabs are not announced
 	nextCheck time.Time // no recheck of confirmed collabs before this
 }
@@ -116,7 +120,7 @@ func New(f *File, v Videos, p Poster, m Matcher, set Settings, log *slog.Logger)
 	}
 	set.MentionWords = slices.DeleteFunc(slices.Clone(set.MentionWords), func(w string) bool { return w == "" })
 	return &Service{file: f, vids: v, post: p, match: m, set: set, log: log, now: time.Now,
-		queue: map[string]queued{}, wake: make(chan struct{}, 1)}
+		queue: map[string]queued{}, recent: map[string][]time.Time{}, wake: make(chan struct{}, 1)}
 }
 
 // Enqueue puts videos in line for a lookup and returns how many were new:

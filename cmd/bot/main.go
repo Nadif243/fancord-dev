@@ -61,6 +61,12 @@ func loadPartners(path string, log *slog.Logger) (*partners.Book, error) {
 	return book, nil
 }
 
+// Gateway intents beyond the default. They are written as numbers (Discord's own bit values) rather than by the library's names.
+const (
+	intentGuildMessages  = discordgo.Intent(1 << 9)
+	intentMessageContent = discordgo.Intent(1 << 15) // privileged
+)
+
 func run(log *slog.Logger) error {
 	// A missing .env is fine (the settings may come from the real environment).
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -140,6 +146,10 @@ func run(log *slog.Logger) error {
 			MentionWords:   cfg.Review.MentionWords,
 			IgnoreChannels: cfg.Review.IgnoreChannels,
 		}, log).WithAnnouncer(announcer)
+		if cfg.X.BearerToken != "" && cfg.X.FanLookupCap > 0 {
+			// Its own client: the relay's runs in another goroutine.
+			review.WithX(xapi.NewClient(cfg.X.BearerToken), cfg.X.FanLookupCap)
+		}
 		recapService.WithGuests(review) // confirmed collabs on other channels join the weekly recap
 	}
 	var reviewer discord.CollabReviewer // stays a nil interface when review is off
@@ -162,9 +172,18 @@ func run(log *slog.Logger) error {
 		Reminder:         remindPreview,
 		Collab:           collab,
 		Outside:          reviewer,
+		LinkChannelID:    cfg.Channels.CollabLinks,
 		ReviewRoleID:     cfg.Review.RoleID,
 	})
 	s.AddHandler(router.OnInteraction)
+	if reviewer != nil && cfg.Channels.CollabLinks != "" {
+		// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents). Asking for it without that switch makes Discord refuse the connection, so it is asked for only when the fan channel is set.
+		s.Identify.Intents |= intentGuildMessages | intentMessageContent
+		s.AddHandler(router.OnMessage)
+		log.Info("fan collab-link channel is on", "channel", cfg.Channels.CollabLinks)
+	} else if cfg.Channels.CollabLinks != "" {
+		log.Warn("CHANNEL_COLLAB_LINKS is set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID); the channel is ignored")
+	}
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		log.Info("connected to Discord", "bot", r.User.Username)
 	})

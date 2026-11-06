@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -45,10 +44,10 @@ type CollabTagger interface {
 	Change(videoID, add, remove string) (collabs.Outcome, error)
 }
 
-// CollabReviewer takes collab candidates and the reviewers' decisions.
+// CollabReviewer takes the links people send and the reviewers' decisions.
 // *outside.Service satisfies it.
 type CollabReviewer interface {
-	Enqueue(source, ref string, ids ...string) int
+	Submit(ctx context.Context, who, name, text string, allowX bool) outside.Reply
 	Review(action, videoID, by string) (outside.Result, error)
 }
 
@@ -57,11 +56,6 @@ type CollabReviewer interface {
 const (
 	permAdministrator int64 = 1 << 3
 	permManageGuild   int64 = 1 << 5
-)
-
-const (
-	collabLinkCooldown = 30 * time.Second
-	collabLinkMax      = 5 // links taken from one /collablink
 )
 
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
@@ -75,6 +69,9 @@ type Deps struct {
 	Collab           CollabTagger         // nil when the recap is off
 	Outside          CollabReviewer       // nil when collab review is off
 
+	// LinkChannelID is the fan channel where links are read from messages.
+	LinkChannelID string
+
 	// ReviewRoleID is the role that may press Confirm and Ignore. When it is empty, members with Manage Server or Administrator may instead.
 	ReviewRoleID string
 }
@@ -87,10 +84,6 @@ type Router struct {
 	// suggest answers the "type to search" lists of a command's options, by command name. It returns what to offer for the option being typed.
 	suggest map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice
 	deps    Deps
-
-	mu       sync.Mutex
-	lastLink map[string]time.Time // /collablink: when each person last sent one
-	now      func() time.Time
 }
 
 func NewRouter(log *slog.Logger, deps Deps) *Router {
@@ -99,8 +92,6 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 		handlers: map[string]handler{},
 		suggest:  map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice{},
 		deps:     deps,
-		lastLink: map[string]time.Time{},
-		now:      time.Now,
 	}
 
 	r.add(&discordgo.ApplicationCommand{Name: "ping", Description: msg.PingDescription}, handlePing)
@@ -346,7 +337,7 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 	}
 }
 
-// handleCollabLink queues the YouTube links in what a fan typed.
+// handleCollabLink queues the YouTube links in what a fan typed. X links are not read here (that needs more than the three seconds a command has); the fan channel reads them.
 func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	if r.deps.Outside == nil {
 		return replyPrivate(s, i, msg.CollabLinkOff)
@@ -357,44 +348,102 @@ func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.Interaction
 			text = opt.StringValue()
 		}
 	}
-	ids, verdict := r.acceptLinks(userKey(i), text)
-	switch verdict {
-	case linkNone:
-		return replyPrivate(s, i, msg.CollabLinkNone)
-	case linkSlow:
-		return replyPrivate(s, i, msg.CollabLinkSlow)
-	}
-
-	n := r.deps.Outside.Enqueue("manual", userName(i), ids...)
-	if n == 0 {
-		return replyPrivate(s, i, msg.CollabLinkKnown)
-	}
-	return replyPrivate(s, i, msg.CollabLinkThanks(n))
+	return replyPrivate(s, i, linkText(r.submit(false, userKey(i), userName(i), text)))
 }
 
-type linkVerdict int
+// submit hands a person's text to the review service. Only the fan channel reads X posts: a slash command has three seconds to answer, which an X lookup can exceed.
+func (r *Router) submit(fromChannel bool, who, name, text string) outside.Reply {
+	return r.deps.Outside.Submit(context.Background(), who, name, text, fromChannel)
+}
 
+// linkText is what a person is told about their submission.
+func linkText(r outside.Reply) string {
+	switch r.Outcome {
+	case outside.Queued:
+		return msg.CollabLinkThanks(r.New)
+	case outside.Known:
+		return msg.CollabLinkKnown
+	case outside.Slow:
+		return msg.CollabLinkSlow
+	case outside.XNotHere:
+		return msg.CollabLinkXNotHere
+	case outside.XNoLink:
+		return msg.CollabLinkXNoLink
+	case outside.XCapReached:
+		return msg.CollabLinkXCap
+	case outside.XFailed:
+		return msg.CollabLinkXFailed
+	case outside.XNotFound:
+		return msg.CollabLinkXNotFound
+	}
+	return msg.CollabLinkNone
+}
+
+// Emoji the bot puts under a message in the fan channel.
 const (
-	linkOK   linkVerdict = iota
-	linkNone             // no YouTube link in the text
-	linkSlow             // this person sent one a moment ago
+	reactQueued = "✅"
+	reactKnown  = "🔁"
+	reactSlow   = "⏳"
 )
 
-// acceptLinks finds the videos in what somebody typed (at most collabLinkMax) and applies the per-person cooldown. Only a call that is accepted starts the cooldown.
-func (r *Router) acceptLinks(who, text string) ([]string, linkVerdict) {
-	ids := outside.YouTubeIDs(text)
-	if len(ids) == 0 {
-		return nil, linkNone
+// channelAnswer decides how the bot answers a message in the fan channel: a small reaction when that says enough, a written reply when the person needs to do something, and nothing for ordinary chat.
+func channelAnswer(r outside.Reply) (reaction, reply string) {
+	switch r.Outcome {
+	case outside.Queued:
+		return reactQueued, ""
+	case outside.Known:
+		return reactKnown, ""
+	case outside.Slow:
+		return reactSlow, ""
+	case outside.NoLink:
+		return "", ""
 	}
-	ids = ids[:min(len(ids), collabLinkMax)]
+	return "", linkText(r)
+}
 
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.lastLink[who].Add(collabLinkCooldown).After(r.now()) {
-		return nil, linkSlow
+// fanMessage says whether a message is one the fan channel should read, and who sent it. Bots (this one included) and every other channel are skipped.
+func (r *Router) fanMessage(m *discordgo.MessageCreate) (who, name string, ok bool) {
+	if m == nil || m.Message == nil || r.deps.LinkChannelID == "" || m.ChannelID != r.deps.LinkChannelID || r.deps.Outside == nil {
+		return "", "", false
 	}
-	r.lastLink[who] = r.now()
-	return ids, linkOK
+	if m.Author == nil || m.Author.Bot {
+		return "", "", false
+	}
+	name = m.Author.Username
+	if m.Member != nil && m.Member.Nick != "" {
+		name = m.Member.Nick
+	}
+	return m.Author.ID, name, true
+}
+
+// OnMessage is the handler for messages in the fan channel. Pass it to Session.AddHandler only when the channel is set (it needs the Message Content intent).
+func (r *Router) OnMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
+	who, name, ok := r.fanMessage(m)
+	if !ok {
+		return
+	}
+	log := r.log.With("message", m.ID)
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("fan channel handler panicked", "panic", rec)
+		}
+	}()
+	reaction, text := channelAnswer(r.submit(true, who, name, m.Content))
+	if reaction != "" {
+		if err := s.MessageReactionAdd(m.ChannelID, m.ID, reaction); err != nil {
+			log.Warn("could not react", "err", err)
+		}
+	}
+	if text != "" {
+		_, err := s.ChannelMessageSendComplex(m.ChannelID, &discordgo.MessageSend{
+			Content:         text,
+			Reference:       m.Reference(),
+			AllowedMentions: nobody(),
+		})
+		if err != nil {
+			log.Warn("could not reply", "err", err)
+		}
+	}
 }
 
 // userKey identifies who ran the command (their Discord ID).

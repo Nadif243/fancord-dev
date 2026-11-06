@@ -529,8 +529,11 @@ type CollabCandidateView struct {
 // CollabCandidate is the review message (English, for the reviewers). The buttons are attached by the caller. The link is plain so Discord shows the video's preview.
 func CollabCandidate(v CollabCandidateView) string {
 	origin := "sent by " + escape(v.SourceRef)
-	if v.Source == "tweet" {
+	switch v.Source {
+	case "tweet":
 		origin = "found in her X post <https://x.com/i/status/" + escape(v.SourceRef) + ">"
+	case "xlink":
+		origin = "found in an X post a fan sent <https://x.com/i/status/" + escape(v.SourceRef) + ">"
 	}
 	partner := "not in partners.csv"
 	if len(v.Partners) > 0 {
@@ -585,6 +588,12 @@ const (
 	CollabLinkKnown             = "Link itu sudah pernah masuk daftar, terima kasih!"
 	CollabLinkSlow              = "Pelan-pelan ya, tunggu sebentar sebelum kirim link lagi."
 	CollabLinkOff               = "Fitur ini belum aktif."
+
+	CollabLinkXNoLink   = "Tweet itu tidak berisi link YouTube. Kirim link YouTube-nya langsung ya."
+	CollabLinkXCap      = "Batas pengecekan link X bulan ini sudah tercapai. Kirim link YouTube-nya langsung ya."
+	CollabLinkXFailed   = "Aku belum bisa membaca tweet itu sekarang. Kirim link YouTube-nya langsung ya."
+	CollabLinkXNotFound = "Tweet itu tidak ditemukan (mungkin dihapus, atau akunnya privat)."
+	CollabLinkXNotHere  = "Di sini hanya link YouTube yang bisa dipakai. Kirim link YouTube-nya ya."
 )
 
 // CollabLinkThanks answers a fan whose link was queued for the reviewers.

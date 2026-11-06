@@ -23,6 +23,7 @@ const (
 	defaultHistoryFile      = "data/history.json"
 	defaultPartnersFile     = "partners.csv"
 	defaultCollabFile       = "data/collabs.json"
+	defaultXFanLookupCap    = 20
 	defaultOutsideFile      = "data/outside.json"
 	defaultMentionWords     = "yuura,yozakura"
 	defaultXUsername        = "YozakuraYuura"
@@ -44,6 +45,9 @@ type Channels struct {
 	Approval string // mod approval queue
 	Recap    string // the weekly recap; the announcement channel when not set
 	Tweets   string // her X posts; the announcement channel when not set
+
+	// CollabLinks is where fans send collab links as ordinary messages. Empty means off; it needs the Message Content intent (see .env.example).
+	CollabLinks string
 }
 
 // X holds the settings for relaying her X posts. Without a token the relay is simply off.
@@ -53,6 +57,9 @@ type X struct {
 	PollEvery   time.Duration // how often X is checked
 	Kinds       []string      // post types to relay: post, reply, quote, repost
 	MonthlyCap  int           // billed reads per month before the relay pauses
+
+	// FanLookupCap is how many X posts per month may be read for links fans send (one billed read each). 0 turns reading them off.
+	FanLookupCap int
 }
 
 // Review holds the settings for collabs on other channels: candidates are posted in the approval channel and confirmed with buttons.
@@ -133,6 +140,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
 	c.Channels.Recap = optionalID("CHANNEL_RECAP", c.Channels.Announce)
 	c.Channels.Tweets = optionalID("CHANNEL_TWEETS", c.Channels.Announce)
+	c.Channels.CollabLinks = optionalID("CHANNEL_COLLAB_LINKS", "")
 	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 
@@ -227,7 +235,7 @@ var RelayKinds = []string{"post", "reply", "quote", "repost"}
 
 // loadX reads the X settings. The token is never repeated in an error message.
 func loadX(get func(string) string, problems *[]string) X {
-	x := X{BearerToken: get("X_BEARER_TOKEN"), Username: defaultXUsername, MonthlyCap: defaultXMonthlyCap}
+	x := X{BearerToken: get("X_BEARER_TOKEN"), Username: defaultXUsername, MonthlyCap: defaultXMonthlyCap, FanLookupCap: defaultXFanLookupCap}
 
 	if v := strings.TrimPrefix(get("X_USERNAME"), "@"); v != "" {
 		if !xUsername.MatchString(v) {
@@ -254,6 +262,15 @@ func loadX(get func(string) string, problems *[]string) X {
 			*problems = append(*problems, "X_MONTHLY_READ_CAP must be a whole number of "+strconv.Itoa(minXMonthlyCap)+" or more, got "+quote(v))
 		} else {
 			x.MonthlyCap = n
+		}
+	}
+
+	if v := get("X_FAN_LOOKUP_CAP"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			*problems = append(*problems, "X_FAN_LOOKUP_CAP must be a whole number, 0 or more, got "+quote(v))
+		} else {
+			x.FanLookupCap = n
 		}
 	}
 

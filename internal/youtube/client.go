@@ -145,6 +145,53 @@ func (c *Client) playlistPage(ctx context.Context, playlistID, pageToken string)
 	return ids, list.NextPageToken, nil
 }
 
+// Video is what the bot needs to know about one video on any channel.
+type Video struct {
+	ID           string
+	Title        string
+	Description  string
+	ChannelID    string
+	ChannelTitle string
+
+	// State and Kind are zero for an ordinary upload (a cover song, say) and
+	// set for a live stream or premiere. Without the channel's Live tab to
+	// consult, a video that has already ended is called a stream.
+	State broadcast.State
+	Kind  broadcast.Kind
+
+	Start time.Time // zero when unknown
+	End   time.Time // zero until it has ended
+}
+
+// Videos looks up videos by ID, on any channel, 50 at a time, for 1 quota unit per 50. A video that is private, deleted or does not exist is simply not in the answer.
+func (c *Client) Videos(ctx context.Context, ids []string) (map[string]Video, error) {
+	out := make(map[string]Video, len(ids))
+	for len(ids) > 0 {
+		batch := ids[:min(len(ids), pageSize)]
+		ids = ids[len(batch):]
+
+		var details videosResponse
+		err := c.get(ctx, "videos", url.Values{
+			"part": {"snippet,liveStreamingDetails,contentDetails"},
+			"id":   {strings.Join(batch, ",")},
+		}, &details)
+		if err != nil {
+			return nil, err
+		}
+		for _, v := range details.Items {
+			info := Video{
+				ID: v.ID, Title: v.Snippet.Title, Description: v.Snippet.Description,
+				ChannelID: v.Snippet.ChannelID, ChannelTitle: v.Snippet.ChannelTitle,
+			}
+			if st, isStream := toStream(v, nil); isStream {
+				info.State, info.Kind, info.Start, info.End = st.State, st.Kind, st.StartAt, st.EndAt
+			}
+			out[v.ID] = info
+		}
+	}
+	return out, nil
+}
+
 // streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids. Only those carry liveStreamingDetails, which is how we tell them from ordinary uploads.
 func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool) ([]broadcast.Stream, error) {
 	var details videosResponse
@@ -344,7 +391,10 @@ type videosResponse struct {
 type video struct {
 	ID      string `json:"id"`
 	Snippet struct {
-		Title string `json:"title"`
+		Title        string `json:"title"`
+		Description  string `json:"description"`
+		ChannelID    string `json:"channelId"`
+		ChannelTitle string `json:"channelTitle"`
 		// "upcoming", "live" or "none"
 		LiveBroadcastContent string `json:"liveBroadcastContent"`
 	} `json:"snippet"`

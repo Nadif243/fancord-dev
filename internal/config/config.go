@@ -23,6 +23,8 @@ const (
 	defaultHistoryFile      = "data/history.json"
 	defaultPartnersFile     = "partners.csv"
 	defaultCollabFile       = "data/collabs.json"
+	defaultOutsideFile      = "data/outside.json"
+	defaultMentionWords     = "yuura,yozakura"
 	defaultXUsername        = "YozakuraYuura"
 	defaultXPollSeconds     = 300
 	minXPollSeconds         = 60
@@ -53,6 +55,14 @@ type X struct {
 	MonthlyCap  int           // billed reads per month before the relay pauses
 }
 
+// Review holds the settings for collabs on other channels: candidates are posted in the approval channel and confirmed with buttons.
+type Review struct {
+	RoleID         string   // who may press the buttons (optional, see discord.canReview)
+	File           string   // where the decisions are kept
+	MentionWords   []string // words that show a video is about her
+	IgnoreChannels []string // YouTube channel IDs that are never shown
+}
+
 // YouTube holds the settings for reading her channel. Both are optional, so the bot still starts without them; the commands that need them say so.
 type YouTube struct {
 	APIKey    string        // secret
@@ -78,6 +88,7 @@ type Config struct {
 	Pings          Pings
 	YouTube        YouTube
 	X              X
+	Review         Review
 	HeartbeatEvery time.Duration
 }
 
@@ -150,6 +161,30 @@ func Load(getenv func(string) string) (Config, error) {
 	c.PartnersFile = get("PARTNERS_FILE")
 	if c.PartnersFile == "" {
 		c.PartnersFile = defaultPartnersFile
+	}
+
+	c.Review.RoleID = optionalID("ROLE_COLLAB_REVIEW", "")
+	c.Review.File = get("OUTSIDE_FILE")
+	if c.Review.File == "" {
+		c.Review.File = defaultOutsideFile
+	}
+	words := get("COLLAB_MENTION_WORDS")
+	if words == "" {
+		words = defaultMentionWords
+	}
+	for _, w := range strings.Split(words, ",") {
+		if w = strings.TrimSpace(w); w != "" {
+			c.Review.MentionWords = append(c.Review.MentionWords, w)
+		}
+	}
+	for _, id := range strings.Split(get("COLLAB_IGNORE_CHANNELS"), ",") {
+		if id = strings.TrimSpace(id); id == "" {
+			continue
+		} else if !youtubeChannelID.MatchString(id) {
+			problems = append(problems, "COLLAB_IGNORE_CHANNELS must be YouTube channel IDs (UC followed by 22 characters), got "+quote(id))
+		} else {
+			c.Review.IgnoreChannels = append(c.Review.IgnoreChannels, id)
+		}
 	}
 
 	c.CollabFile = get("COLLAB_FILE")

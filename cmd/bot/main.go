@@ -23,6 +23,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/discord"
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/ops"
+	"github.com/Nadif243/fancord-bot/internal/outside"
 	"github.com/Nadif243/fancord-bot/internal/partners"
 	"github.com/Nadif243/fancord-bot/internal/poller"
 	"github.com/Nadif243/fancord-bot/internal/recap"
@@ -97,8 +98,10 @@ func run(log *slog.Logger) error {
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource
+	var yt *youtube.Client
 	if cfg.YouTube.APIKey != "" {
-		source = youtube.NewClient(cfg.YouTube.APIKey)
+		yt = youtube.NewClient(cfg.YouTube.APIKey)
+		source = yt
 	}
 
 	// The recap reads the history, so it only makes sense while the poller
@@ -106,6 +109,7 @@ func run(log *slog.Logger) error {
 	pollerOn := source != nil && cfg.YouTube.ChannelID != ""
 	var recapService *recap.Service
 	var collab discord.CollabTagger // stays a nil interface when the recap is off
+	var review *outside.Service     // collabs on other channels; nil when YouTube is off
 	if pollerOn {
 		book, err := loadPartners(cfg.PartnersFile, log)
 		if err != nil {
@@ -124,6 +128,22 @@ func run(log *slog.Logger) error {
 			WithPartners(who, cfg.Channels.Ops).
 			WithReminder(cfg.Channels.Test, memory)
 		collab = who
+
+		decisions, err := outside.OpenFile(cfg.Review.File)
+		if err != nil {
+			return err
+		}
+		log.Info("collab review file ready", "path", cfg.Review.File)
+		review = outside.New(decisions, yt, messenger, book, outside.Settings{
+			ChannelID:      cfg.Channels.Approval,
+			OwnChannelID:   cfg.YouTube.ChannelID,
+			MentionWords:   cfg.Review.MentionWords,
+			IgnoreChannels: cfg.Review.IgnoreChannels,
+		}, log)
+	}
+	var reviewer discord.CollabReviewer // stays a nil interface when review is off
+	if review != nil {
+		reviewer = review
 	}
 	var preview discord.RecapPreviewer          // stays a nil interface when the recap is off
 	var remindPreview discord.ReminderPreviewer // same for the reminder
@@ -140,6 +160,8 @@ func run(log *slog.Logger) error {
 		Recap:            preview,
 		Reminder:         remindPreview,
 		Collab:           collab,
+		Outside:          reviewer,
+		ReviewRoleID:     cfg.Review.RoleID,
 	})
 	s.AddHandler(router.OnInteraction)
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
@@ -184,14 +206,21 @@ func run(log *slog.Logger) error {
 		for i, k := range cfg.X.Kinds {
 			kinds[i] = xapi.Kind(k)
 		}
-		start(relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
+		rel := relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
 			Username:   cfg.X.Username,
 			ChannelID:  cfg.Channels.Tweets,
 			OpsID:      cfg.Channels.Ops,
 			Every:      cfg.X.PollEvery,
 			Kinds:      kinds,
 			MonthlyCap: cfg.X.MonthlyCap,
-		}, log).Run)
+		}, log)
+		if review != nil {
+			// YouTube links in her posts become collab candidates. Links the
+			// relay saw before this feature existed are picked up too.
+			rel.OnLinks(func(postID string, videoIDs []string) { review.Enqueue("tweet", postID, videoIDs...) })
+			review.Seed(memory.Relay().Links)
+		}
+		start(rel.Run)
 	} else {
 		log.Info("tweet relay is off: set X_BEARER_TOKEN to turn it on")
 	}
@@ -205,6 +234,7 @@ func run(log *slog.Logger) error {
 		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
 			OnFirstCheck(back.FirstCheckDone).Run)
 		start(recapService.Run)
+		start(review.Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
 	}

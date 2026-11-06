@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
@@ -14,6 +15,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/collabs"
 	"github.com/Nadif243/fancord-bot/internal/msg"
+	"github.com/Nadif243/fancord-bot/internal/outside"
 	"github.com/Nadif243/fancord-bot/internal/partners"
 )
 
@@ -43,6 +45,25 @@ type CollabTagger interface {
 	Change(videoID, add, remove string) (collabs.Outcome, error)
 }
 
+// CollabReviewer takes collab candidates and the reviewers' decisions.
+// *outside.Service satisfies it.
+type CollabReviewer interface {
+	Enqueue(source, ref string, ids ...string) int
+	Review(action, videoID, by string) (outside.Result, error)
+}
+
+// Permission bits of a Discord member (see Discord's permissions table).
+// Kept here as plain numbers so this file does not depend on the library's constant names.
+const (
+	permAdministrator int64 = 1 << 3
+	permManageGuild   int64 = 1 << 5
+)
+
+const (
+	collabLinkCooldown = 30 * time.Second
+	collabLinkMax      = 5 // links taken from one /collablink
+)
+
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
 	DevAnnouncer     *broadcast.Announcer // for /devstream only: it posts fake streams and forgets them
@@ -52,6 +73,10 @@ type Deps struct {
 	Recap            RecapPreviewer       // nil when the recap is off
 	Reminder         ReminderPreviewer    // nil when the reminder is off
 	Collab           CollabTagger         // nil when the recap is off
+	Outside          CollabReviewer       // nil when collab review is off
+
+	// ReviewRoleID is the role that may press Confirm and Ignore. When it is empty, members with Manage Server or Administrator may instead.
+	ReviewRoleID string
 }
 
 // Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
@@ -62,6 +87,10 @@ type Router struct {
 	// suggest answers the "type to search" lists of a command's options, by command name. It returns what to offer for the option being typed.
 	suggest map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice
 	deps    Deps
+
+	mu       sync.Mutex
+	lastLink map[string]time.Time // /collablink: when each person last sent one
+	now      func() time.Time
 }
 
 func NewRouter(log *slog.Logger, deps Deps) *Router {
@@ -70,6 +99,8 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 		handlers: map[string]handler{},
 		suggest:  map[string]func(*discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice{},
 		deps:     deps,
+		lastLink: map[string]time.Time{},
+		now:      time.Now,
 	}
 
 	r.add(&discordgo.ApplicationCommand{Name: "ping", Description: msg.PingDescription}, handlePing)
@@ -150,6 +181,18 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 	}, r.handleCollab)
 	r.suggest["collab"] = r.collabChoices
 
+	// /collablink is for everyone: fans send the YouTube link of a collab on another channel; reviewers then confirm it with the buttons.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "collablink",
+		Description: msg.CollabLinkDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:        discordgo.ApplicationCommandOptionString,
+			Name:        "link",
+			Description: msg.CollabLinkOptionDescription,
+			Required:    true,
+		}},
+	}, r.handleCollabLink)
+
 	return r
 }
 
@@ -173,6 +216,8 @@ func (r *Router) OnInteraction(s *discordgo.Session, i *discordgo.InteractionCre
 		r.onCommand(s, i)
 	case discordgo.InteractionApplicationCommandAutocomplete:
 		r.onAutocomplete(s, i)
+	case discordgo.InteractionMessageComponent:
+		r.onComponent(s, i)
 	}
 }
 
@@ -233,6 +278,131 @@ func reply(s *discordgo.Session, i *discordgo.InteractionCreate, content string)
 		// Whatever is in the text (a title, a typed name), it can never ping anyone.
 		Data: &discordgo.InteractionResponseData{Content: content, AllowedMentions: nobody()},
 	})
+}
+
+// replyPrivate answers so that only the person who pressed or typed sees it.
+func replyPrivate(s *discordgo.Session, i *discordgo.InteractionCreate, content string) error {
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Content: content, AllowedMentions: nobody(), Flags: discordgo.MessageFlagsEphemeral},
+	})
+}
+
+// canReview says whether this member may press the review buttons: with a reviewer role configured, only people who have it; without one, only members with Manage Server or Administrator (so the buttons are never open to everybody).
+func canReview(m *discordgo.Member, roleID string) bool {
+	if m == nil {
+		return false
+	}
+	if roleID != "" {
+		return slices.Contains(m.Roles, roleID)
+	}
+	return m.Permissions&(permAdministrator|permManageGuild) != 0
+}
+
+// onComponent handles a press on a button under a review message.
+func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	customID := i.MessageComponentData().CustomID
+	action, videoID, ok := outside.ParseCustomID(customID)
+	if !ok {
+		return // not one of ours
+	}
+	log := r.log.With("button", action, "video", videoID)
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("button panicked", "panic", rec)
+			_ = replyPrivate(s, i, msg.CommandFailed)
+		}
+	}()
+
+	switch {
+	case r.deps.Outside == nil:
+		_ = replyPrivate(s, i, msg.CollabReviewOff)
+		return
+	case !canReview(i.Member, r.deps.ReviewRoleID):
+		_ = replyPrivate(s, i, msg.CollabReviewDenied)
+		return
+	}
+
+	res, err := r.deps.Outside.Review(action, videoID, userName(i))
+	if errors.Is(err, outside.ErrUnknown) {
+		_ = replyPrivate(s, i, msg.CollabReviewOff)
+		return
+	}
+	if err != nil {
+		log.Error("could not save the decision (it holds until restart)", "err", err)
+	}
+	// Edit the review message itself: new text, and an EMPTY list of components
+	// (not nil) so the buttons disappear.
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:         res.Text,
+			Components:      []discordgo.MessageComponent{},
+			AllowedMentions: nobody(),
+		},
+	})
+	if err != nil {
+		log.Error("could not update the review message", "err", err)
+	}
+}
+
+// handleCollabLink queues the YouTube links in what a fan typed.
+func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if r.deps.Outside == nil {
+		return replyPrivate(s, i, msg.CollabLinkOff)
+	}
+	var text string
+	for _, opt := range i.ApplicationCommandData().Options {
+		if opt.Name == "link" {
+			text = opt.StringValue()
+		}
+	}
+	ids, verdict := r.acceptLinks(userKey(i), text)
+	switch verdict {
+	case linkNone:
+		return replyPrivate(s, i, msg.CollabLinkNone)
+	case linkSlow:
+		return replyPrivate(s, i, msg.CollabLinkSlow)
+	}
+
+	n := r.deps.Outside.Enqueue("manual", userName(i), ids...)
+	if n == 0 {
+		return replyPrivate(s, i, msg.CollabLinkKnown)
+	}
+	return replyPrivate(s, i, msg.CollabLinkThanks(n))
+}
+
+type linkVerdict int
+
+const (
+	linkOK   linkVerdict = iota
+	linkNone             // no YouTube link in the text
+	linkSlow             // this person sent one a moment ago
+)
+
+// acceptLinks finds the videos in what somebody typed (at most collabLinkMax) and applies the per-person cooldown. Only a call that is accepted starts the cooldown.
+func (r *Router) acceptLinks(who, text string) ([]string, linkVerdict) {
+	ids := outside.YouTubeIDs(text)
+	if len(ids) == 0 {
+		return nil, linkNone
+	}
+	ids = ids[:min(len(ids), collabLinkMax)]
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.lastLink[who].Add(collabLinkCooldown).After(r.now()) {
+		return nil, linkSlow
+	}
+	r.lastLink[who] = r.now()
+	return ids, linkOK
+}
+
+// userKey identifies who ran the command (their Discord ID).
+func userKey(i *discordgo.InteractionCreate) string {
+	if i.Member != nil && i.Member.User != nil {
+		return i.Member.User.ID
+	}
+	return ""
 }
 
 func handlePing(s *discordgo.Session, i *discordgo.InteractionCreate) error {

@@ -96,11 +96,16 @@ type Relay struct {
 	pausedUntil time.Time // after "no credits": no checks before this moment
 	warned      string    // the month the 80% warning was sent for
 	capNoted    string    // the month the cap message was sent for
+
+	onLinks func(postID string, videoIDs []string)
 }
 
 func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Relay {
 	return &Relay{src: src, store: st, send: send, set: set, log: log, now: time.Now}
 }
+
+// OnLinks sets a function that is called with the YouTube videos found in a post, after the post was handled and saved. Set it before Run.
+func (r *Relay) OnLinks(f func(postID string, videoIDs []string)) { r.onLinks = f }
 
 // Run checks once at the start, then every interval, until ctx ends.
 func (r *Relay) Run(ctx context.Context) {
@@ -217,6 +222,9 @@ func (r *Relay) round(ctx context.Context) error {
 		if err := r.save(st); err != nil {
 			return err
 		}
+		if ids := linkIDs(p); len(ids) > 0 && r.onLinks != nil {
+			r.onLinks(p.ID, ids)
+		}
 	}
 	return r.afterReads(st)
 }
@@ -256,15 +264,20 @@ func (r *Relay) postURL(id string) string {
 	return "https://x.com/" + r.set.Username + "/status/" + id
 }
 
+// linkIDs lists the YouTube videos linked in a post, once each.
+func linkIDs(p xapi.Post) []string {
+	var ids []string
+	for _, raw := range p.URLs {
+		if id, ok := YouTubeID(raw); ok && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
 // appendLinks adds the YouTube videos found in the post, once each per post, and keeps at most maxLinks.
 func appendLinks(links []Link, p xapi.Post, now time.Time) []Link {
-	seen := map[string]bool{}
-	for _, raw := range p.URLs {
-		id, ok := YouTubeID(raw)
-		if !ok || seen[id] {
-			continue
-		}
-		seen[id] = true
+	for _, id := range linkIDs(p) {
 		links = append(links, Link{PostID: p.ID, VideoID: id, Found: now.UTC()})
 	}
 	if over := len(links) - maxLinks; over > 0 {

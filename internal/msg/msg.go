@@ -442,6 +442,95 @@ func clockLabel(t time.Time) string {
 	return dateLabel(t) + " " + t.In(zoneWIB).Format("15:04") + " WIB"
 }
 
+// CollabCandidateView is what a reviewer is shown about a video on another channel.
+type CollabCandidateView struct {
+	Title        string
+	ChannelTitle string
+	URL          string
+	State        string // "upcoming", "live", "ended", or "" for an ordinary video
+	Premiere     bool
+	Start        time.Time
+	Mentions     bool     // the title or description names her
+	Partners     []string // partners.csv names that match
+	Source       string   // "tweet" or "manual"
+	SourceRef    string   // the X post ID, or who sent it
+}
+
+// CollabCandidate is the review message (English, for the reviewers). The buttons are attached by the caller. The link is plain so Discord shows the video's preview.
+func CollabCandidate(v CollabCandidateView) string {
+	origin := "sent by " + escape(v.SourceRef)
+	if v.Source == "tweet" {
+		origin = "found in her X post <https://x.com/i/status/" + escape(v.SourceRef) + ">"
+	}
+	partner := "not in partners.csv"
+	if len(v.Partners) > 0 {
+		partner = escapeAll(v.Partners)
+	}
+	mentions := "no"
+	if v.Mentions {
+		mentions = "yes"
+	}
+	return fmt.Sprintf("🔎 **Collab candidate** · %s\n**%s**\n📺 %s · %s\n🎤 Mentions Yuura: %s · Partner: %s\n%s",
+		origin, escape(shorten(v.Title, 150)), escape(shorten(v.ChannelTitle, 80)), collabStateLine(v), mentions, partner, v.URL)
+}
+
+func collabStateLine(v CollabCandidateView) string {
+	what := "stream"
+	if v.Premiere {
+		what = "premiere"
+	}
+	switch v.State {
+	case "upcoming":
+		if v.Start.IsZero() {
+			return "waiting room · start time not set"
+		}
+		return "waiting room (" + what + ") · " + clockLabel(v.Start)
+	case "live":
+		return what + " live now"
+	case "ended":
+		return what + " ended"
+	}
+	return "ordinary video, not a stream"
+}
+
+// CollabDecided is the review message after a decision: the same text, with the verdict added at the end (the buttons are removed by the caller).
+// decision is "confirmed", "ignored" or "channel-ignored".
+func CollabDecided(v CollabCandidateView, decision, by string) string {
+	verdict := "✅ **Confirmed** by " + escape(by)
+	switch decision {
+	case "ignored":
+		verdict = "🚫 **Ignored** by " + escape(by)
+	case "channel-ignored":
+		verdict = "🚫 **Ignored**, and this channel will not be shown again, by " + escape(by)
+	}
+	return CollabCandidate(v) + "\n" + verdict
+}
+
+// ---- /collablink (Indonesian, for fans) -----------------------------------
+
+const (
+	CollabLinkDescription       = "Kirim link YouTube kolaborasi Yuura di channel lain untuk dicek"
+	CollabLinkOptionDescription = "Link video atau waiting room YouTube"
+	CollabLinkNone              = "Aku tidak menemukan link YouTube di situ. Kirim link videonya langsung, misalnya https://www.youtube.com/watch?v=..."
+	CollabLinkKnown             = "Link itu sudah pernah masuk daftar, terima kasih!"
+	CollabLinkSlow              = "Pelan-pelan ya, tunggu sebentar sebelum kirim link lagi."
+	CollabLinkOff               = "Fitur ini belum aktif."
+)
+
+// CollabLinkThanks answers a fan whose link was queued for the reviewers.
+func CollabLinkThanks(n int) string {
+	if n > 1 {
+		return fmt.Sprintf("Terima kasih! %d link sudah masuk antrean untuk dicek moderator.", n)
+	}
+	return "Terima kasih! Linknya sudah masuk antrean untuk dicek moderator."
+}
+
+// CollabReviewDenied is the answer to somebody without the reviewer role who pressed a button (English; only they see it).
+const CollabReviewDenied = "Only members with the reviewer role can confirm or ignore collabs."
+
+// CollabReviewOff says the button no longer works for this video.
+const CollabReviewOff = "This candidate is no longer known to the bot."
+
 // TweetRelay is the message for one of her X posts in the tweets channel (Indonesian, for fans). The link is plain so Discord shows its preview.
 // kind is "post", "reply", "quote" or "repost".
 func TweetRelay(kind, url string) string {

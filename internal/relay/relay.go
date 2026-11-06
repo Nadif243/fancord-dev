@@ -8,6 +8,7 @@ package relay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -73,6 +74,10 @@ const (
 	requestTimeout = 30 * time.Second
 	// A run of failures this long is worth a message in ops.
 	alertAfterFailures = 3
+
+	// X answers 402 when the account has no credits. Asking again every few minutes cannot help, so the relay waits this long between tries.
+	noCreditsStatus = 402
+	noCreditsPause  = time.Hour
 	// Warn in ops when this share of the monthly cap is used.
 	warnAt = 0.8
 )
@@ -86,10 +91,11 @@ type Relay struct {
 	log   *slog.Logger
 	now   func() time.Time
 
-	failures int
-	alerted  bool
-	warned   string // the month the 80% warning was sent for
-	capNoted string // the month the cap message was sent for
+	failures    int
+	alerted     bool
+	pausedUntil time.Time // after "no credits": no checks before this moment
+	warned      string    // the month the 80% warning was sent for
+	capNoted    string    // the month the cap message was sent for
 }
 
 func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Relay {
@@ -115,6 +121,9 @@ func (r *Relay) Run(ctx context.Context) {
 
 // Check does one round. A failure only skips the round; the next one tries again.
 func (r *Relay) Check(parent context.Context) {
+	if r.now().Before(r.pausedUntil) {
+		return // waiting for credits to be added
+	}
 	ctx, cancel := context.WithTimeout(parent, requestTimeout)
 	defer cancel()
 
@@ -123,6 +132,15 @@ func (r *Relay) Check(parent context.Context) {
 			return // shutting down
 		}
 		r.failures++
+		if hasStatus(err, noCreditsStatus) {
+			r.pausedUntil = r.now().Add(noCreditsPause)
+			r.log.Warn("tweet relay: X says there are no credits; trying again in an hour (restart the bot to try sooner)", "err", err)
+			if !r.alerted {
+				r.alerted = true
+				r.ops(msg.RelayNoCredits())
+			}
+			return
+		}
 		r.log.Warn("tweet relay: check failed, will try again", "err", err, "failures", r.failures, "in", r.set.Every)
 		if r.failures >= alertAfterFailures && !r.alerted {
 			r.alerted = true
@@ -154,11 +172,10 @@ func (r *Relay) round(ctx context.Context) error {
 	}
 	if st.UserID == "" {
 		id, err := r.src.UserID(ctx, r.set.Username)
-		st.Reads += 2 // a user read costs about twice a post read
 		if err != nil {
-			_ = r.save(st) // the read may have been billed even so
-			return err
+			return err // a refused call is not billed, so it is not counted
 		}
+		st.Reads += 2 // a user read costs $0.01, twice a post read
 		st.UserID = id
 		if err := r.save(st); err != nil {
 			return err
@@ -166,11 +183,10 @@ func (r *Relay) round(ctx context.Context) error {
 	}
 
 	page, err := r.src.Posts(ctx, st.UserID, st.LastPostID)
-	st.Reads += page.Billed
 	if err != nil {
-		_ = r.save(st)
-		return err
+		return err // nothing came back, so nothing was billed
 	}
+	st.Reads += page.Billed
 	if err := r.save(st); err != nil {
 		return err
 	}
@@ -212,6 +228,12 @@ func (r *Relay) afterReads(st State) error {
 		r.ops(msg.RelayBudgetWarning(st.Reads, cap))
 	}
 	return nil
+}
+
+// hasStatus reports whether err is X answering with this HTTP status.
+func hasStatus(err error, status int) bool {
+	var s interface{ Status() int }
+	return errors.As(err, &s) && s.Status() == status
 }
 
 func (r *Relay) save(st State) error {

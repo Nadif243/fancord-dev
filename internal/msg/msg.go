@@ -462,6 +462,11 @@ func RelayFailing(failures int, err string) string {
 	return fmt.Sprintf("⚠️ **Tweet relay** · %d checks in a row have failed, so new tweets are not being relayed. It keeps trying; this note comes once.\nLast error: %s", failures, escape(shorten(err, 300)))
 }
 
+// RelayNoCredits is the ops note when X says the account has no credits.
+func RelayNoCredits() string {
+	return "💳 **Tweet relay** · X says the account has no credits, so new tweets are not being relayed. Add credit in the X developer console. The bot asks again once an hour (restart it to ask right away); this note comes once."
+}
+
 // RelayBudgetWarning is the ops note when most of the monthly X read cap is used.
 func RelayBudgetWarning(reads, cap int) string {
 	return fmt.Sprintf("💸 **Tweet relay** · %d of %d X reads used this month. It pauses at the cap and resumes next month; raise X_MONTHLY_READ_CAP to allow more.", reads, cap)

@@ -41,7 +41,7 @@ type Post struct {
 // Page is what one call returned.
 type Page struct {
 	Posts []Post // oldest first
-	// Billed is how many posts X most likely charged for: the posts returned plus the originals that came with them.
+	// Billed is how many posts X charged for: the posts returned. (The originals that come along with a repost or a quote were not charged in the first real day of use, and neither were checks that found nothing.)
 	Billed int
 }
 
@@ -172,7 +172,7 @@ func (r response) page() Page {
 		out = append(out, post)
 	}
 	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
-	return Page{Posts: out, Billed: len(r.Data) + len(originals)}
+	return Page{Posts: out, Billed: len(r.Data)}
 }
 
 func (p rawPost) urls() []string {
@@ -275,6 +275,9 @@ func (e *statusError) Error() string {
 	}
 	return fmt.Sprintf("x %s: HTTP %d: %s", e.path, e.status, text)
 }
+
+// Status is the HTTP status of the answer. Other packages ask for it through a small interface, so they do not need to know this type.
+func (e *statusError) Status() int { return e.status }
 
 // Status is the HTTP status of an error from X, or 0 for any other error.
 func Status(err error) int {

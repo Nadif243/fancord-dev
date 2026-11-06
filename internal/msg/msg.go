@@ -64,22 +64,54 @@ func StreamEnded(title, url string) string {
 	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", escape(title), url)
 }
 
-// The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended.
+// The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended. A premiere (a finished video released with a countdown) says so.
 
-func CollabUpcoming(title, channel, url string, start time.Time) string {
+func CollabUpcoming(title, channel, url string, start time.Time, premiere bool) string {
 	head := fmt.Sprintf("🤝 **Collab Yuura di channel lain**: %s\n📺 %s", escape(title), escape(shorten(channel, 80)))
+	if premiere {
+		head = fmt.Sprintf("🤝 **Collab Yuura di channel lain (premiere)**: %s\n📺 %s", escape(title), escape(shorten(channel, 80)))
+	}
 	if start.IsZero() {
 		return head + "\n" + url
 	}
 	return fmt.Sprintf("%s\nMulai %s (%s)\n%s", head, stampFull(start), stamp(start), url)
 }
 
-func CollabLive(title, channel, url string) string {
-	return fmt.Sprintf("🔴 **Collab sedang live!** %s\n📺 %s\n%s", escape(title), escape(shorten(channel, 80)), url)
+func CollabLive(title, channel, url string, premiere bool) string {
+	word := "Collab sedang live!"
+	if premiere {
+		word = "Premiere collab sedang tayang!"
+	}
+	return fmt.Sprintf("🔴 **%s** %s\n📺 %s\n%s", word, escape(title), escape(shorten(channel, 80)), url)
 }
 
-func CollabEnded(title, channel, url string) string {
-	return fmt.Sprintf("⚫ **Collab selesai**: %s\n📺 %s\n%s", escape(title), escape(shorten(channel, 80)), url)
+func CollabEnded(title, channel, url string, premiere bool) string {
+	word := "Collab selesai"
+	if premiere {
+		word = "Premiere collab selesai"
+	}
+	return fmt.Sprintf("⚫ **%s**: %s\n📺 %s\n%s", word, escape(title), escape(shorten(channel, 80)), url)
+}
+
+// PingCollabUpcoming and PingCollabLive are the role pings for a collab, sent to the same roles as the pings for her own streams.
+func PingCollabUpcoming(roleID, title, channel, url string, start time.Time, premiere bool) string {
+	word := "Jadwal collab baru"
+	if premiere {
+		word = "Jadwal premiere collab baru"
+	}
+	text := fmt.Sprintf("⏰ <@&%s> **%s**: %s\n📺 %s", roleID, word, escape(title), escape(shorten(channel, 80)))
+	if !start.IsZero() {
+		text += fmt.Sprintf("\nMulai %s (%s)", stampFull(start), stamp(start))
+	}
+	return text + "\n<" + url + ">"
+}
+
+func PingCollabLive(roleID, title, channel, url string, premiere bool) string {
+	word := "Collab sedang live!"
+	if premiere {
+		word = "Premiere collab sedang tayang!"
+	}
+	return fmt.Sprintf("🔴 <@&%s> **%s** %s\n📺 %s\n<%s>", roleID, word, escape(title), escape(shorten(channel, 80)), url)
 }
 
 // PingUpcoming is the separate message that mentions the "new waiting room" role. The link is in <angle brackets> so Discord does not show a second preview; the announcement itself already has one.
@@ -346,7 +378,7 @@ func RecapUnknownHandles(handles []string) string {
 // DevRecapDescription and friends are the texts of /devrecap.
 const (
 	DevRecapDescription      = "Kirim pratinjau rekap mingguan ke channel ini (khusus dev)"
-	DevRecapWeeksDescription = "Berapa minggu ke belakang (0 = rekap terakhir, bawaan 0)"
+	DevRecapWeeksDescription = "Minggu: 0 = minggu berjalan sejauh ini (bawaan), 1 = rekap terakhir yang sudah selesai, dst."
 	DevRecapSent             = "Pratinjau rekap sudah dikirim."
 	DevRecapOff              = "Rekap belum aktif. Isi YOUTUBE_API_KEY dan YOUTUBE_CHANNEL_ID di .env lalu jalankan ulang bot."
 )

@@ -242,12 +242,12 @@ func (s *Service) PreviewReminder(channelID string) (pending, total int, err err
 	return pending, total, s.post(channelID, texts, nil)
 }
 
-// Preview posts the recap of a past week to channelID without touching the "already posted" memory. weeksAgo 0 is the most recent complete week.
+// Preview posts a recap to channelID without touching the "already posted" memory. weeksAgo 0 is the week in progress (what the coming Sunday recap would say right now), 1 the most recent complete week, and so on.
 func (s *Service) Preview(channelID string, weeksAgo int) error {
 	if weeksAgo < 0 {
 		return errors.New("weeksAgo cannot be negative")
 	}
-	due := LastDue(s.now()).AddDate(0, 0, -7*weeksAgo)
+	due := NextDue(s.now()).AddDate(0, 0, -7*weeksAgo)
 	texts, note := s.render(due)
 	if err := s.post(channelID, texts, nil); err != nil {
 		return err

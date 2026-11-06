@@ -106,6 +106,10 @@ func (a *Announcer) Update(s Stream) error {
 func (a *Announcer) ping(s Stream) error {
 	var text, role string
 	switch {
+	case s.Channel != "" && s.State == Upcoming && a.upcomingRole != "":
+		role, text = a.upcomingRole, msg.PingCollabUpcoming(a.upcomingRole, s.Title, s.Channel, s.URL(), s.StartAt, s.Kind == KindPremiere)
+	case s.Channel != "" && s.State == Live && a.liveRole != "":
+		role, text = a.liveRole, msg.PingCollabLive(a.liveRole, s.Title, s.Channel, s.URL(), s.Kind == KindPremiere)
 	case s.Channel != "":
 		return nil // collabs on other channels are announced without pings
 	case s.State == Upcoming && a.upcomingRole != "":
@@ -132,13 +136,14 @@ func (a *Announcer) remember(s Stream, messageID, text string) error {
 
 func textFor(s Stream) string {
 	if s.Channel != "" {
+		premiere := s.Kind == KindPremiere
 		switch s.State {
 		case Live:
-			return msg.CollabLive(s.Title, s.Channel, s.URL())
+			return msg.CollabLive(s.Title, s.Channel, s.URL(), premiere)
 		case Ended:
-			return msg.CollabEnded(s.Title, s.Channel, s.URL())
+			return msg.CollabEnded(s.Title, s.Channel, s.URL(), premiere)
 		default:
-			return msg.CollabUpcoming(s.Title, s.Channel, s.URL(), s.StartAt)
+			return msg.CollabUpcoming(s.Title, s.Channel, s.URL(), s.StartAt, premiere)
 		}
 	}
 	switch s.State {

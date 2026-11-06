@@ -438,7 +438,7 @@ func (s *Service) active() []Item {
 // recheck looks at every confirmed collab again and announces it, or updates its announcement, once every check passes:
 //   - YouTube still shows the video (it was not deleted or made private),
 //   - its channel was not ignored in the meantime,
-//   - it is a real stream (not an ordinary video or a premiere),
+//   - it is a stream or a premiere (not an ordinary video),
 //   - a waiting room has a start time, and is no more than 14 days away.
 //
 // Anything else is simply looked at again later (or, when it can never qualify, given up on).
@@ -503,8 +503,8 @@ func (s *Service) settle(id string, found map[string]youtube.Video) {
 		x.Title, x.ChannelID, x.ChannelTitle = v.Title, v.ChannelID, v.ChannelTitle
 		x.State, x.Kind, x.Start, x.End = v.State, v.Kind, v.Start, v.End
 		switch {
-		case v.State == 0 || v.Kind == broadcast.KindPremiere:
-			x.Done = true // an ordinary video or a premiere is not a stream announcement
+		case v.State == 0:
+			x.Done = true // an ordinary video has no waiting room or live moment to announce
 		case v.State == broadcast.Upcoming && (v.Start.IsZero() || v.Start.Sub(s.now()) > maxAhead):
 			// no start time yet, or placeholder far ahead: not announced, looked at again
 		default:
@@ -536,7 +536,7 @@ func (s *Service) settle(id string, found map[string]youtube.Video) {
 func (s *Service) Guests(from, to time.Time) []recap.Guest {
 	var out []recap.Guest
 	for _, it := range s.file.Items() {
-		if it.Status != Confirmed || it.State != broadcast.Ended || it.Kind == broadcast.KindPremiere {
+		if it.Status != Confirmed || it.State != broadcast.Ended {
 			continue
 		}
 		at := it.End

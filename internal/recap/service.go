@@ -55,6 +55,7 @@ type Service struct {
 
 	remindID string         // where the Saturday reminder goes; empty: no reminder
 	remarker ReminderMarker // remembers the last reminder handled
+	guests   Guests         // collabs on other channels; nil: the recap has none
 }
 
 // New makes a Service. settle should be a little longer than the poll interval: the stream that ended just before the deadline has to be seen as ended by the poller before the recap counts it.
@@ -66,6 +67,12 @@ func New(src Source, send Sender, marker Marker, channelID string, settle time.D
 func (s *Service) WithPartners(m Matcher, opsChannelID string) *Service {
 	s.partners = m
 	s.opsID = opsChannelID
+	return s
+}
+
+// WithGuests adds the week's confirmed collabs on other channels to the recap.
+func (s *Service) WithGuests(g Guests) *Service {
+	s.guests = g
 	return s
 }
 
@@ -132,7 +139,11 @@ func (s *Service) tickRecap() {
 func (s *Service) render(due time.Time) (texts []string, note string) {
 	from := due.Add(-window)
 	entries := s.src.Ended(from, due)
-	texts = msg.Recap(Build(entries, from, due, s.partners))
+	var guests []Guest
+	if s.guests != nil {
+		guests = s.guests.Guests(from, due)
+	}
+	texts = msg.Recap(BuildWithGuests(entries, guests, from, due, s.partners))
 	if unknown := UnknownHandles(entries, s.partners); len(unknown) > 0 {
 		note = msg.RecapUnknownHandles(unknown)
 	}

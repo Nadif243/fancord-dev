@@ -106,6 +106,8 @@ func (a *Announcer) Update(s Stream) error {
 func (a *Announcer) ping(s Stream) error {
 	var text, role string
 	switch {
+	case s.Channel != "":
+		return nil // collabs on other channels are announced without pings
 	case s.State == Upcoming && a.upcomingRole != "":
 		role, text = a.upcomingRole, msg.PingUpcoming(a.upcomingRole, s.Title, s.URL(), s.StartAt)
 	case s.State == Live && a.liveRole != "":
@@ -129,6 +131,16 @@ func (a *Announcer) remember(s Stream, messageID, text string) error {
 }
 
 func textFor(s Stream) string {
+	if s.Channel != "" {
+		switch s.State {
+		case Live:
+			return msg.CollabLive(s.Title, s.Channel, s.URL())
+		case Ended:
+			return msg.CollabEnded(s.Title, s.Channel, s.URL())
+		default:
+			return msg.CollabUpcoming(s.Title, s.Channel, s.URL(), s.StartAt)
+		}
+	}
 	switch s.State {
 	case Live:
 		return msg.StreamLive(s.Title, s.URL())

@@ -29,6 +29,10 @@ type Stream struct {
 	Kind    Kind      // 0 (unset) is treated as a stream
 	StartAt time.Time // scheduled start; the zero value means "not known"
 	EndAt   time.Time // when it ended; the zero value means "not over, or not known"
+
+	// Channel is the name of the channel it happens on when that is not hers:
+	// a collab on a partner's channel. Empty means her own channel.
+	Channel string
 }
 
 // URL is the watch link. Discord shows a video preview for it by itself.

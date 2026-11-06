@@ -56,6 +56,10 @@ type Item struct {
 	Added     time.Time `json:"added"`
 	Decided   time.Time `json:"decided"`
 	DecidedBy string    `json:"decidedBy,omitempty"`
+
+	// After a confirmation: Done means nothing more will be announced or updated for this video. Missing counts rechecks in a row that did not find the video (deleted or made private).
+	Done    bool `json:"done,omitempty"`
+	Missing int  `json:"missing,omitempty"`
 }
 
 type fileData struct {

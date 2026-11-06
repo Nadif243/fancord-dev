@@ -4,6 +4,7 @@
 package recap
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -65,9 +66,27 @@ type Matcher interface {
 	Checked(videoID string) bool
 }
 
+// Guest is a collab on somebody else's channel that took place in the week.
+type Guest struct {
+	Title, Channel, URL string
+	Start               time.Time
+	Duration            time.Duration // 0 when unknown
+	Partners            []string      // partners.csv names, one each
+}
+
+// Guests lists the confirmed collabs on other channels that ended in [from, to). *outside.Service satisfies it.
+type Guests interface {
+	Guests(from, to time.Time) []Guest
+}
+
 // Build turns the streams that ended in [from, to) into what the recap says.
 // partners may be nil: the recap then has no collab line.
 func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.RecapWeek {
+	return BuildWithGuests(entries, nil, from, to, partners)
+}
+
+// BuildWithGuests is Build plus the week's collabs on other channels. They are listed in their own section and their partners count in the collab line, but they add nothing to her stream count, total time, longest stream or busiest day: those are about her own channel.
+func BuildWithGuests(entries []history.Entry, guests []Guest, from, to time.Time, partners Matcher) msg.RecapWeek {
 	w := msg.RecapWeek{From: from.In(WIB), To: to.In(WIB)}
 
 	type item struct {
@@ -93,6 +112,19 @@ func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.Re
 		w.Longest = longest(w.Streams)
 		w.Busiest = busiestDay(w.Streams)
 	}
+	guests = slices.Clone(guests)
+	sort.SliceStable(guests, func(i, j int) bool { return guests[i].Start.Before(guests[j].Start) })
+	for _, g := range guests {
+		start := g.Start.In(WIB)
+		st := msg.RecapStream{Title: g.Title, URL: g.URL, Start: start, Duration: g.Duration, Channel: g.Channel}
+		if partners != nil {
+			st.With = partners.Summary(g.Partners)
+		}
+		w.Guests = append(w.Guests, st)
+		perStream = append(perStream, streamWho{start: start, names: g.Partners})
+	}
+	// countCollabs wants oldest first, and the guests were added after her own.
+	sort.SliceStable(perStream, func(i, j int) bool { return perStream[i].start.Before(perStream[j].start) })
 	w.Collabs = countCollabs(perStream)
 	return w
 }

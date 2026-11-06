@@ -139,7 +139,8 @@ func run(log *slog.Logger) error {
 			OwnChannelID:   cfg.YouTube.ChannelID,
 			MentionWords:   cfg.Review.MentionWords,
 			IgnoreChannels: cfg.Review.IgnoreChannels,
-		}, log)
+		}, log).WithAnnouncer(announcer)
+		recapService.WithGuests(review) // confirmed collabs on other channels join the weekly recap
 	}
 	var reviewer discord.CollabReviewer // stays a nil interface when review is off
 	if review != nil {

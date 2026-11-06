@@ -64,6 +64,24 @@ func StreamEnded(title, url string) string {
 	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", escape(title), url)
 }
 
+// The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended.
+
+func CollabUpcoming(title, channel, url string, start time.Time) string {
+	head := fmt.Sprintf("🤝 **Collab Yuura di channel lain**: %s\n📺 %s", escape(title), escape(shorten(channel, 80)))
+	if start.IsZero() {
+		return head + "\n" + url
+	}
+	return fmt.Sprintf("%s\nMulai %s (%s)\n%s", head, stampFull(start), stamp(start), url)
+}
+
+func CollabLive(title, channel, url string) string {
+	return fmt.Sprintf("🔴 **Collab sedang live!** %s\n📺 %s\n%s", escape(title), escape(shorten(channel, 80)), url)
+}
+
+func CollabEnded(title, channel, url string) string {
+	return fmt.Sprintf("⚫ **Collab selesai**: %s\n📺 %s\n%s", escape(title), escape(shorten(channel, 80)), url)
+}
+
 // PingUpcoming is the separate message that mentions the "new waiting room" role. The link is in <angle brackets> so Discord does not show a second preview; the announcement itself already has one.
 func PingUpcoming(roleID, title, url string, start time.Time) string {
 	title = escape(title)
@@ -125,6 +143,7 @@ type RecapStream struct {
 	Start    time.Time
 	Duration time.Duration // 0 when unknown
 	With     []string      // who was in it, already shortened (a full team is one name)
+	Channel  string        // set for a collab on another channel: whose channel it was
 }
 
 // RecapDay is one calendar day (WIB) of the week.
@@ -149,6 +168,7 @@ type RecapWeek struct {
 	Longest  *RecapStream
 	Busiest  *RecapDay
 	Collabs  []RecapCollab // most streams first; empty = the line is left out
+	Guests   []RecapStream // collabs on other channels, oldest first
 }
 
 // A Discord message holds at most 2000 characters; stay clear of it.
@@ -170,17 +190,21 @@ var (
 func Recap(w RecapWeek) []string {
 	head := fmt.Sprintf("📊 **Rekap mingguan** · %s – %s", shortDate(w.From), shortDate(w.To))
 
-	if len(w.Streams) == 0 {
+	if len(w.Streams) == 0 && len(w.Guests) == 0 {
 		return []string{head + "\nMinggu ini Yuura tidak stream."}
 	}
 
 	var b strings.Builder
 	b.WriteString(head + "\n")
-	b.WriteString(fmt.Sprintf("Yuura stream **%d kali**", len(w.Streams)))
-	if w.Total > 0 {
-		b.WriteString(fmt.Sprintf(", total **%s**", duration(w.Total)))
+	if len(w.Streams) == 0 {
+		b.WriteString("Minggu ini Yuura tidak stream di channelnya sendiri.")
+	} else {
+		b.WriteString(fmt.Sprintf("Yuura stream **%d kali**", len(w.Streams)))
+		if w.Total > 0 {
+			b.WriteString(fmt.Sprintf(", total **%s**", duration(w.Total)))
+		}
+		b.WriteString(".")
 	}
-	b.WriteString(".")
 	if w.Longest != nil {
 		b.WriteString(fmt.Sprintf("\n🏆 Terpanjang: %s (%s)%s", recapTitle(*w.Longest), duration(w.Longest.Duration), recapWatch(*w.Longest)))
 	}
@@ -191,11 +215,22 @@ func Recap(w RecapWeek) []string {
 	if len(w.Collabs) > 0 {
 		b.WriteString("\n🤝 Kolaborasi: " + collabList(w.Collabs))
 	}
-	b.WriteString("\n\n**Daftar stream**")
-
-	lines := make([]string, len(w.Streams))
-	for i, st := range w.Streams {
-		lines[i] = recapLine(st)
+	var lines []string
+	if len(w.Streams) > 0 {
+		b.WriteString("\n\n**Daftar stream**")
+		for _, st := range w.Streams {
+			lines = append(lines, recapLine(st))
+		}
+	}
+	if len(w.Guests) > 0 {
+		if len(lines) == 0 {
+			b.WriteString("\n\n**Kolaborasi di channel lain**")
+		} else {
+			lines = append(lines, "\n**Kolaborasi di channel lain**")
+		}
+		for _, st := range w.Guests {
+			lines = append(lines, recapLine(st))
+		}
 	}
 	return splitLines(b.String(), lines)
 }
@@ -208,7 +243,7 @@ func splitLines(head string, lines []string) []string {
 		line := "\n" + l
 		if utf8.RuneCountInString(cur)+utf8.RuneCountInString(line) > recapMaxLen {
 			out = append(out, cur)
-			cur = l
+			cur = strings.TrimPrefix(l, "\n") // a continuation does not start with a blank line
 			continue
 		}
 		cur += line
@@ -262,6 +297,9 @@ func recapLine(st RecapStream) string {
 	line := fmt.Sprintf("• %s %s · %s", dayNames[st.Start.Weekday()][:3], shortDate(st.Start), recapTitle(st))
 	if st.Duration > 0 {
 		line += " · " + duration(st.Duration)
+	}
+	if st.Channel != "" {
+		line += " · di " + escape(shorten(st.Channel, 40))
 	}
 	if len(st.With) > 0 {
 		line += " · bareng " + escapeAll(st.With)
@@ -337,7 +375,7 @@ func dateLabel(t time.Time) string {
 	return dayNames[t.Weekday()][:3] + " " + shortDate(t)
 }
 
-// CollabStreamLabel is one line in the list of streams that appears while typing /collab. It is plain text (Discord does not format these labels), at most 100 characters, with a 🤝 when somebody is already tagged  and a ✅ when a person has checked the stream.
+// CollabStreamLabel is one line in the list of streams that appears while typing /collab. It is plain text (Discord does not format these labels), at most 100 characters, with a 🤝 when somebody is already tagged and a ✅ when a person has checked the stream.
 func CollabStreamLabel(start time.Time, title string, tagged, checked bool) string {
 	label := dateLabel(start) + " · " + strings.Join(strings.Fields(title), " ")
 	if tagged {

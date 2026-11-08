@@ -60,6 +60,11 @@ type Sender interface {
 	Send(channelID, content string) (messageID string, err error)
 }
 
+// Pinger posts a message that mentions one role. The Discord messenger satisfies it too; the relay uses it when a tweet ping role is set.
+type Pinger interface {
+	Ping(channelID, content, roleID string) error
+}
+
 // Settings are what the relay is configured with.
 type Settings struct {
 	Username  string // her handle, without the @
@@ -68,9 +73,12 @@ type Settings struct {
 
 	// When set, these are asked each time instead of the two fixed IDs above, so the channels can be changed while the bot runs.
 	ChannelFn, OpsFn func() string
-	Every            time.Duration // how often to check X
-	Kinds            []xapi.Kind   // which post types to relay
-	MonthlyCap       int           // billed reads per month; 0 means no cap
+
+	// RoleFn, when set, is asked each time for the role to ping with each relayed post. Empty answer (or no RoleFn): no ping.
+	RoleFn     func() string
+	Every      time.Duration // how often to check X
+	Kinds      []xapi.Kind   // which post types to relay
+	MonthlyCap int           // billed reads per month; 0 means no cap
 }
 
 const (
@@ -101,10 +109,25 @@ type Relay struct {
 	capNoted    string    // the month the cap message was sent for
 
 	onLinks func(postID string, videoIDs []string)
+	pinger  Pinger // the sender, when it can also ping; nil otherwise
 }
 
 func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Relay {
-	return &Relay{src: src, store: st, send: send, set: set, log: log, now: time.Now}
+	r := &Relay{src: src, store: st, send: send, set: set, log: log, now: time.Now}
+	r.pinger, _ = send.(Pinger)
+	return r
+}
+
+// announce posts one relayed post, pinging the tweet role when one is set.
+func (r *Relay) announce(kind, postURL string) error {
+	channel := r.channel()
+	if r.set.RoleFn != nil && r.pinger != nil {
+		if role := r.set.RoleFn(); role != "" {
+			return r.pinger.Ping(channel, msg.TweetRelayPing(role, kind, postURL), role)
+		}
+	}
+	_, err := r.send.Send(channel, msg.TweetRelay(kind, postURL))
+	return err
 }
 
 // OnLinks sets a function that is called with the YouTube videos found in a post, after the post was handled and saved. Set it before Run.
@@ -216,7 +239,7 @@ func (r *Relay) round(ctx context.Context) error {
 			continue // the API should not repeat, but a repeat must not be posted twice
 		}
 		if slices.Contains(r.set.Kinds, p.Kind) {
-			if _, err := r.send.Send(r.channel(), msg.TweetRelay(string(p.Kind), r.postURL(p.ID))); err != nil {
+			if err := r.announce(string(p.Kind), r.postURL(p.ID)); err != nil {
 				return fmt.Errorf("post %s to Discord: %w", p.ID, err) // not marked handled: tried again next round
 			}
 		}

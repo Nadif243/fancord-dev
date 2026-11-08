@@ -265,6 +265,8 @@ func setupSave(a SettingsAdmin, env setupEnv, key settings.Key, isRole bool, id 
 		notes = append(notes, msg.SetupNoteReminder)
 	case settings.Ping:
 		notes = append(notes, msg.SetupNotePing)
+	case settings.TweetPing:
+		notes = append(notes, msg.SetupNoteTweetPing)
 	case settings.Reviewer:
 		notes = append(notes, msg.SetupNoteReviewer)
 	case settings.Fans:

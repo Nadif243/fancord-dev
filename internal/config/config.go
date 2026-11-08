@@ -91,6 +91,9 @@ type Pings struct {
 
 	// Both is one role for both; the two above, when set, win over it.
 	Both string
+
+	// Tweets is the role pinged for each relayed tweet. Empty: no ping.
+	Tweets string
 }
 
 type Config struct {
@@ -160,6 +163,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 	c.Pings.Both = optionalID("ROLE_PING", "")
+	c.Pings.Tweets = optionalID("ROLE_PING_TWEETS", "")
 
 	// The key is never repeated in an error message, whatever is wrong with it.
 	c.YouTube.APIKey = get("YOUTUBE_API_KEY")
@@ -191,16 +195,17 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Review.RoleID = optionalID("ROLE_COLLAB_REVIEW", "")
 	c.Written = settings.Env{
 		Values: map[settings.Key]string{
-			settings.Announce: get("CHANNEL_ANNOUNCE"),
-			settings.Tweets:   get("CHANNEL_TWEETS"),
-			settings.Recap:    get("CHANNEL_RECAP"),
-			settings.Fans:     get("CHANNEL_COLLAB_LINKS"),
-			settings.Review:   get("CHANNEL_APPROVAL"),
-			settings.Ops:      get("CHANNEL_OPS"),
-			settings.Staff:    get("CHANNEL_TEST"),
-			settings.Reminder: get("CHANNEL_REMINDER"),
-			settings.Ping:     get("ROLE_PING"),
-			settings.Reviewer: get("ROLE_COLLAB_REVIEW"),
+			settings.Announce:  get("CHANNEL_ANNOUNCE"),
+			settings.Tweets:    get("CHANNEL_TWEETS"),
+			settings.Recap:     get("CHANNEL_RECAP"),
+			settings.Fans:      get("CHANNEL_COLLAB_LINKS"),
+			settings.Review:    get("CHANNEL_APPROVAL"),
+			settings.Ops:       get("CHANNEL_OPS"),
+			settings.Staff:     get("CHANNEL_TEST"),
+			settings.Reminder:  get("CHANNEL_REMINDER"),
+			settings.Ping:      get("ROLE_PING"),
+			settings.TweetPing: get("ROLE_PING_TWEETS"),
+			settings.Reviewer:  get("ROLE_COLLAB_REVIEW"),
 		},
 		PingUpcoming: c.Pings.Upcoming,
 		PingLive:     c.Pings.Live,

@@ -702,6 +702,11 @@ func HeartbeatOffline(version string, now time.Time) string {
 	return fmt.Sprintf("**Offline** · v%s\nStopped cleanly %s", version, stamp(now))
 }
 
+// TweetRelayPing is TweetRelay with the role mentioned in front, for the message that pings. roleID is a Discord role ID.
+func TweetRelayPing(roleID, kind, url string) string {
+	return "<@&" + roleID + "> " + TweetRelay(kind, url)
+}
+
 // ---- /rodok (Indonesian, for fans) ----------------------------------------
 
 const (
@@ -800,13 +805,14 @@ const (
 	SetupPermsPost = "I may not be able to post in %s. I need View Channel and Send Messages there; check the channel's permissions."
 	SetupPermsFans = "I may not be able to work in %s. I need View Channel, Send Messages, Add Reactions and Read Message History there; check the channel's permissions."
 
-	SetupNoteAnnounce = "A stream already announced keeps being updated in the channel it was posted in. The recap and tweets follow this channel unless they have their own."
-	SetupNoteReview   = "Candidates already waiting keep their buttons where they are; new ones go here."
-	SetupNoteOps      = "The heartbeat posts a fresh message there on its next beat; the old one stays where it was."
-	SetupNoteStaff    = "Dev commands and /collab now work only in %s. Review, ops and the Saturday reminder follow it unless they have their own channel."
-	SetupNoteReminder = "The Saturday reminder goes here from now on."
-	SetupNotePing     = "This one role is pinged both for a waiting room and when she goes live. It must allow \"anyone can mention this role\", or the ping will not notify anyone."
-	SetupNoteReviewer = "Only members with this role can press Confirm and Ignore now."
+	SetupNoteAnnounce  = "A stream already announced keeps being updated in the channel it was posted in. The recap and tweets follow this channel unless they have their own."
+	SetupNoteReview    = "Candidates already waiting keep their buttons where they are; new ones go here."
+	SetupNoteOps       = "The heartbeat posts a fresh message there on its next beat; the old one stays where it was."
+	SetupNoteStaff     = "Dev commands and /collab now work only in %s. Review, ops and the Saturday reminder follow it unless they have their own channel."
+	SetupNoteReminder  = "The Saturday reminder goes here from now on."
+	SetupNotePing      = "This one role is pinged both for a waiting room and when she goes live. It must allow \"anyone can mention this role\", or the ping will not notify anyone."
+	SetupNoteTweetPing = "This role is pinged for every tweet the bot relays (posts, replies, quotes and reposts). It must allow \"anyone can mention this role\", or the ping will not notify anyone."
+	SetupNoteReviewer  = "Only members with this role can press Confirm and Ignore now."
 
 	SetupNoteFansRestart = "The bot did not ask Discord for message content when it started, so it cannot read this channel yet. Turn on Message Content Intent in the Developer Portal (Bot > Privileged Gateway Intents), then restart the bot once. After that it works without restarts."
 	SetupNoteFansNoYT    = "Collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID), so this channel does nothing yet."

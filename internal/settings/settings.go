@@ -31,16 +31,17 @@ var ErrRefused = errors.New("refused")
 type Key string
 
 const (
-	Announce Key = "announce" // stream announcements
-	Tweets   Key = "tweets"   // her relayed X posts
-	Recap    Key = "recap"    // the weekly recap
-	Fans     Key = "fans"     // where fans paste collab links
-	Review   Key = "review"   // collab candidates with the buttons
-	Ops      Key = "ops"      // heartbeat and alerts
-	Staff    Key = "staff"    // staff desk: /collab, dev commands
-	Reminder Key = "reminder" // the Saturday reminder
-	Ping     Key = "ping"     // the role pinged for waiting rooms and live streams
-	Reviewer Key = "reviewer" // the role that may press the review buttons
+	Announce  Key = "announce"  // stream announcements
+	Tweets    Key = "tweets"    // her relayed X posts
+	Recap     Key = "recap"     // the weekly recap
+	Fans      Key = "fans"      // where fans paste collab links
+	Review    Key = "review"    // collab candidates with the buttons
+	Ops       Key = "ops"       // heartbeat and alerts
+	Staff     Key = "staff"     // staff desk: /collab, dev commands
+	Reminder  Key = "reminder"  // the Saturday reminder
+	Ping      Key = "ping"      // the role pinged for waiting rooms and live streams
+	TweetPing Key = "tweetping" // the role pinged for each of her relayed tweets
+	Reviewer  Key = "reviewer"  // the role that may press the review buttons
 )
 
 // Kind says what sort of ID a key holds.
@@ -70,6 +71,7 @@ var All = []Info{
 	{Staff, ChannelKind, "Staff desk (/collab and dev commands)", ""},
 	{Reminder, ChannelKind, "Saturday reminder", Staff},
 	{Ping, RoleKind, "Ping role (waiting room and live)", ""},
+	{TweetPing, RoleKind, "Tweet ping role", ""},
 	{Reviewer, RoleKind, "Reviewer role", ""},
 }
 

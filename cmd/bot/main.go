@@ -259,6 +259,7 @@ func run(log *slog.Logger) error {
 			OpsID:      cfg.Channels.Ops,
 			ChannelFn:  channel(settings.Tweets),
 			OpsFn:      channel(settings.Ops),
+			RoleFn:     channel(settings.TweetPing),
 			Every:      cfg.X.PollEvery,
 			Kinds:      kinds,
 			MonthlyCap: cfg.X.MonthlyCap,

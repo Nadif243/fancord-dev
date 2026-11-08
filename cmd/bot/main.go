@@ -28,6 +28,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/poller"
 	"github.com/Nadif243/fancord-bot/internal/recap"
 	"github.com/Nadif243/fancord-bot/internal/relay"
+	"github.com/Nadif243/fancord-bot/internal/rodok"
 	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
@@ -95,6 +96,11 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("history file ready", "path", cfg.HistoryFile)
+	rodokCounts, err := rodok.OpenFile(cfg.RodokFile)
+	if err != nil {
+		return err
+	}
+	log.Info("rodok file ready", "path", cfg.RodokFile)
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
 		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
 
@@ -172,6 +178,7 @@ func run(log *slog.Logger) error {
 		Reminder:         remindPreview,
 		Collab:           collab,
 		Outside:          reviewer,
+		Rodok:            rodok.New(rodokCounts),
 		LinkChannelID:    cfg.Channels.CollabLinks,
 		ReviewRoleID:     cfg.Review.RoleID,
 	})

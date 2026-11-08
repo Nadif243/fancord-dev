@@ -16,6 +16,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/msg"
 	"github.com/Nadif243/fancord-bot/internal/outside"
 	"github.com/Nadif243/fancord-bot/internal/partners"
+	"github.com/Nadif243/fancord-bot/internal/rodok"
 )
 
 // handler runs one slash command. Returning an error only logs it; the user already got whatever the handler managed to reply.
@@ -68,12 +69,18 @@ type Deps struct {
 	Reminder         ReminderPreviewer    // nil when the reminder is off
 	Collab           CollabTagger         // nil when the recap is off
 	Outside          CollabReviewer       // nil when collab review is off
+	Rodok            Rodoker              // nil when /rodok is not set up
 
 	// LinkChannelID is the fan channel where links are read from messages.
 	LinkChannelID string
 
 	// ReviewRoleID is the role that may press Confirm and Ignore. When it is empty, members with Manage Server or Administrator may instead.
 	ReviewRoleID string
+}
+
+// Rodoker counts and limits /rodok. *rodok.Service satisfies it.
+type Rodoker interface {
+	Do(actor, target string) (rodok.Result, error)
 }
 
 // Router owns the bot's slash commands: their definitions (what Discord shows) and their handlers (what runs). To add a command, add one entry in NewRouter.
@@ -183,6 +190,18 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 			Required:    true,
 		}},
 	}, r.handleCollabLink)
+
+	// /rodok is for everyone and works in any channel.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "rodok",
+		Description: msg.RodokDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:        discordgo.ApplicationCommandOptionUser,
+			Name:        "user",
+			Description: msg.RodokOptionDescription,
+			Required:    true,
+		}},
+	}, r.handleRodok)
 
 	return r
 }
@@ -349,6 +368,62 @@ func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.Interaction
 		}
 	}
 	return replyPrivate(s, i, linkText(r.submit(false, userKey(i), userName(i), text)))
+}
+
+// handleRodok answers "A merodok B Nx". The answer is public but pings nobody (see reply). Refusals are private, so a refused try does not fill the channel.
+func (r *Router) handleRodok(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	if r.deps.Rodok == nil {
+		return replyPrivate(s, i, msg.CollabLinkOff)
+	}
+	target, isBot := pickUser(i.ApplicationCommandData(), "user")
+	text, public, err := rodokAnswer(r.deps.Rodok, userKey(i), target, isBot)
+	if err != nil {
+		// The count is right for this run but could not be saved.
+		r.log.Error("could not save the rodok counts", "err", err)
+	}
+	if public {
+		return reply(s, i, text)
+	}
+	return replyPrivate(s, i, text)
+}
+
+// rodokAnswer decides what to say. public is false for a refusal. An error only means the count could not be saved; the text is still right.
+func rodokAnswer(r Rodoker, actor, target string, targetIsBot bool) (text string, public bool, err error) {
+	if actor == "" || target == "" { // a direct message: there is no server member
+		return msg.RodokGuildOnly, false, nil
+	}
+	// These two are refused before the limiter, so they use up nothing.
+	if target == actor {
+		return msg.RodokSelf, false, nil
+	}
+	if targetIsBot {
+		return msg.RodokBot, false, nil
+	}
+
+	res, err := r.Do(actor, target)
+	switch res.Outcome {
+	case rodok.Cooling:
+		return msg.RodokCooling(res.Wait), false, err
+	case rodok.Locked:
+		return msg.RodokLocked(res.Wait), false, err
+	}
+	return msg.Rodok(actor, target, res.Count), true, err
+}
+
+// pickUser returns the ID of the user picked in the named option, and whether that user is a bot. Discord sends the ID as the option's value and the user's details in "resolved".
+func pickUser(data discordgo.ApplicationCommandInteractionData, name string) (id string, isBot bool) {
+	for _, opt := range data.Options {
+		if opt.Name != name {
+			continue
+		}
+		id, _ = opt.Value.(string)
+		if data.Resolved != nil { // reading a field through a nil pointer would panic
+			if u := data.Resolved.Users[id]; u != nil {
+				isBot = u.Bot
+			}
+		}
+	}
+	return id, isBot
 }
 
 // submit hands a person's text to the review service. Only the fan channel reads X posts: a slash command has three seconds to answer, which an X lookup can exceed.

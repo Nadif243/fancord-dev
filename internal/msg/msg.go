@@ -701,3 +701,30 @@ func HeartbeatOnline(version string, started, now time.Time) string {
 func HeartbeatOffline(version string, now time.Time) string {
 	return fmt.Sprintf("**Offline** · v%s\nStopped cleanly %s", version, stamp(now))
 }
+
+// ---- /rodok (Indonesian, for fans) ----------------------------------------
+
+const (
+	RodokDescription       = "Merodok seseorang"
+	RodokOptionDescription = "Siapa yang mau dirodok"
+	RodokGuildOnly         = "Perintah ini hanya bisa dipakai di server."
+
+	// PLACEHOLDERS: Change the text here; nothing else needs to move.
+	RodokSelf = "Malu dikit, masa gooning di publik."
+	RodokBot  = "Don't be a clanker?? :(( #RobotLivesMatter"
+)
+
+// Rodok is the public answer. who and target are Discord user IDs, shown as mentions (the message is sent so that they ping nobody).
+func Rodok(who, target string, n int) string {
+	return fmt.Sprintf("<@%s> merodok <@%s> **%dx**", who, target, n)
+}
+
+// RodokCooling and RodokLocked are PLACEHOLDERS too (see above). wait is how long until the person may try again.
+func RodokCooling(wait time.Duration) string {
+	secs := int((wait + time.Second - 1) / time.Second) // round up, so never "0 detik"
+	return fmt.Sprintf("Terlalu jomok, tunggu %d detik lagi.", secs)
+}
+
+func RodokLocked(wait time.Duration) string {
+	return fmt.Sprintf("Jomok bgt njirr. Sabar, boleh rodok %s detik lagi.", duration(wait))
+}

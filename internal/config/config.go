@@ -23,6 +23,7 @@ const (
 	defaultHistoryFile      = "data/history.json"
 	defaultPartnersFile     = "partners.csv"
 	defaultCollabFile       = "data/collabs.json"
+	defaultRodokFile        = "data/rodok.json"
 	defaultXFanLookupCap    = 20
 	defaultOutsideFile      = "data/outside.json"
 	defaultMentionWords     = "yuura,yozakura"
@@ -88,6 +89,7 @@ type Config struct {
 	HistoryFile    string // where it records every stream it sees, for the recap
 	PartnersFile   string // the collab partner list (CSV) the recap reads
 	CollabFile     string // who people tagged as being in a stream, by hand
+	RodokFile      string // how many times each person has used /rodok on each other person
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
@@ -198,6 +200,11 @@ func Load(getenv func(string) string) (Config, error) {
 	c.CollabFile = get("COLLAB_FILE")
 	if c.CollabFile == "" {
 		c.CollabFile = defaultCollabFile
+	}
+
+	c.RodokFile = get("RODOK_FILE")
+	if c.RodokFile == "" {
+		c.RodokFile = defaultRodokFile
 	}
 
 	c.HistoryFile = get("HISTORY_FILE")

@@ -741,6 +741,52 @@ func Rodok(who, target string, n int) string {
 	return fmt.Sprintf("<@%s> merodok <@%s> **%dx**", who, target, n)
 }
 
+// The leaderboard, /rodokboard.
+const (
+	RodokBoardDescription       = "Papan peringkat rodok"
+	RodokBoardOptionDescription = "Mau lihat pelaku atau korban?"
+	RodokBoardChoiceDoers       = "Pelaku (paling sering merodok)"
+	RodokBoardChoiceTargets     = "Korban (paling sering dirodok)"
+	RodokBoardEmpty             = "Belum ada yang merodok. Jadilah yang pertama!"
+	RodokBoardOff               = "Papan rodok belum tersedia."
+)
+
+// RodokBoardTitle heads the embed.
+func RodokBoardTitle(doers bool) string {
+	if doers {
+		return "🏆 Papan Rodok · Pelaku"
+	}
+	return "🎯 Papan Rodok · Korban"
+}
+
+// RodokBoardLine is one place on the board. The ID is shown as a mention, which an embed shows as a name without pinging anyone.
+func RodokBoardLine(rank int, id string, total, people int, doers bool) string {
+	medal := fmt.Sprintf("`%d.`", rank)
+	switch rank {
+	case 1:
+		medal = "🥇"
+	case 2:
+		medal = "🥈"
+	case 3:
+		medal = "🥉"
+	}
+	what := "dirodok oleh %d orang"
+	if doers {
+		what = "merodok %d orang"
+	}
+	return fmt.Sprintf("%s <@%s> · **%dx** · "+what, medal, id, total, people)
+}
+
+// RodokBoardYou tells a person where they stand when they are not on the list.
+func RodokBoardYou(rank, total int) string {
+	return fmt.Sprintf("Peringkatmu: **#%d** · %dx", rank, total)
+}
+
+// RodokBoardFooter is the small print under the list.
+func RodokBoardFooter(total int) string {
+	return fmt.Sprintf("Total %d rodok sejauh ini", total)
+}
+
 // RodokCooling and RodokLocked are PLACEHOLDERS too (see above). wait is how long until the person may try again.
 func RodokCooling(wait time.Duration) string {
 	secs := int((wait + time.Second - 1) / time.Second) // round up, so never "0 detik"

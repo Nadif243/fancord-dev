@@ -250,6 +250,22 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 		}},
 	}, r.handleRodok)
 
+	// /rodokboard shows who rodoks the most, and who gets rodok-ed the most.
+	r.add(&discordgo.ApplicationCommand{
+		Name:        "rodokboard",
+		Description: msg.RodokBoardDescription,
+		Options: []*discordgo.ApplicationCommandOption{{
+			Type:        discordgo.ApplicationCommandOptionString,
+			Name:        "peringkat",
+			Description: msg.RodokBoardOptionDescription,
+			Required:    true,
+			Choices: []*discordgo.ApplicationCommandOptionChoice{
+				{Name: msg.RodokBoardChoiceDoers, Value: boardDoers},
+				{Name: msg.RodokBoardChoiceTargets, Value: boardTargets},
+			},
+		}},
+	}, r.handleRodokBoard)
+
 	return r
 }
 
@@ -432,6 +448,78 @@ func (r *Router) handleRodok(s *discordgo.Session, i *discordgo.InteractionCreat
 		return reply(s, i, text)
 	}
 	return replyPrivate(s, i, text)
+}
+
+// The two values of /rodokboard's choice.
+const (
+	boardDoers   = "pelaku"
+	boardTargets = "korban"
+)
+
+// boardSize is how many people the leaderboard lists.
+const boardSize = 10
+
+// boardColor is the colour of the embed's stripe (a warm red).
+const boardColor = 0xE8505B
+
+// handleRodokBoard shows the leaderboard as an embed. Like the normal answer it is public, and the mentions in it show names without pinging anyone.
+func (r *Router) handleRodokBoard(s *discordgo.Session, i *discordgo.InteractionCreate) error {
+	board, ok := r.deps.Rodok.(rodok.Board)
+	if r.deps.Rodok == nil || !ok {
+		return replyPrivate(s, i, msg.RodokBoardOff)
+	}
+	embed := rodokBoardEmbed(board, boardIsDoers(i.ApplicationCommandData()), userKey(i))
+	if embed == nil {
+		return reply(s, i, msg.RodokBoardEmpty)
+	}
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseChannelMessageWithSource,
+		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}, AllowedMentions: nobody()},
+	})
+}
+
+// boardIsDoers says whether the person picked "pelaku" (true) or "korban".
+func boardIsDoers(data discordgo.ApplicationCommandInteractionData) bool {
+	for _, opt := range data.Options {
+		if opt.Name == "peringkat" {
+			kind, _ := opt.Value.(string)
+			return kind == boardDoers
+		}
+	}
+	return false
+}
+
+// rodokBoardEmbed builds the leaderboard; nil when nobody has rodok-ed yet.
+// viewer is whoever asked: when they are not on the list, their own place is shown under it.
+func rodokBoardEmbed(b rodok.Board, doers bool, viewer string) *discordgo.MessageEmbed {
+	role := rodok.Targets
+	if doers {
+		role = rodok.Doers
+	}
+	top := b.Top(role, boardSize)
+	if len(top) == 0 {
+		return nil
+	}
+	var lines []string
+	onList := false
+	for n, e := range top {
+		lines = append(lines, msg.RodokBoardLine(n+1, e.ID, e.Total, e.People, doers))
+		if e.ID == viewer {
+			onList = true
+		}
+	}
+	text := strings.Join(lines, "\n")
+	if viewer != "" && !onList {
+		if rank, e, ok := b.Rank(role, viewer); ok {
+			text += "\n\n" + msg.RodokBoardYou(rank, e.Total)
+		}
+	}
+	return &discordgo.MessageEmbed{
+		Title:       msg.RodokBoardTitle(doers),
+		Description: text,
+		Color:       boardColor,
+		Footer:      &discordgo.MessageEmbedFooter{Text: msg.RodokBoardFooter(b.Total())},
+	}
 }
 
 // rodokAnswer decides what to say. public is false only for the spam messages and the "not in a server" case. An error only means the count could not be saved; the text is still right.

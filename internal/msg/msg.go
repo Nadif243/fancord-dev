@@ -728,3 +728,89 @@ func RodokCooling(wait time.Duration) string {
 func RodokLocked(wait time.Duration) string {
 	return fmt.Sprintf("Jomok bgt njirr. Sabar, boleh rodok %s detik lagi.", duration(wait))
 }
+
+// ---- /setup (English: for the fancord head and staff) ---------------------
+
+const (
+	SetupDescription        = "Change the bot's channels and roles (Manage Server only)"
+	SetupShowDescription    = "Show where the bot posts now"
+	SetupChannelDescription = "Set a channel the bot posts in or reads from"
+	SetupRoleDescription    = "Set a role the bot pings or checks"
+	SetupResetDescription   = "Go back to what .env says for one setting"
+	SetupWhichDescription   = "What to change"
+	SetupChannelOption      = "The channel"
+	SetupRoleOption         = "The role"
+
+	SetupDenied = "Only members with Manage Server (or Administrator) can use /setup."
+	SetupOff    = "/setup is not available."
+	SetupBad    = "I could not read that. Pick a setting from the list and a channel or role."
+
+	SetupEveryone = "That is the @everyone role. Pick a real role instead."
+)
+
+// SetupRow is one line of /setup show. Mention is a ready channel or role mention ("" when nothing is set); Note says where it comes from.
+type SetupRow struct{ Label, Mention, Note string }
+
+// SetupShow lists every setting, then any warnings.
+func SetupShow(rows []SetupRow, warnings []string) string {
+	var b strings.Builder
+	b.WriteString("**Current settings**\n")
+	for _, r := range rows {
+		v := r.Mention
+		if v == "" {
+			v = "not set"
+		}
+		fmt.Fprintf(&b, "%s: %s", r.Label, v)
+		if r.Note != "" {
+			fmt.Fprintf(&b, " (%s)", r.Note)
+		}
+		b.WriteByte('\n')
+	}
+	for _, w := range warnings {
+		fmt.Fprintf(&b, "\n%s", w)
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// SetupSaved confirms a change and adds the notes that matter for it.
+func SetupSaved(label, mention string, notes []string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "**%s** is now %s. It applies from the next message.", label, mention)
+	for _, n := range notes {
+		fmt.Fprintf(&b, "\n%s", n)
+	}
+	return b.String()
+}
+
+// SetupReset confirms that a saved value is gone. now is a mention, or "" when nothing is set any more.
+func SetupReset(label, now string, hadSaved bool) string {
+	if !hadSaved {
+		return fmt.Sprintf("**%s** was not changed by /setup, so there is nothing to reset.", label)
+	}
+	if now == "" {
+		return fmt.Sprintf("**%s** is back to .env, which sets nothing for it, so it is off.", label)
+	}
+	return fmt.Sprintf("**%s** is back to %s (what .env says).", label, now)
+}
+
+// Warnings and notes. %s are mentions.
+const (
+	SetupNoSave = "It is in use now, but it could not be written to the settings file, so a restart would forget it."
+
+	SetupPermsPost = "I may not be able to post in %s. I need View Channel and Send Messages there; check the channel's permissions."
+	SetupPermsFans = "I may not be able to work in %s. I need View Channel, Send Messages, Add Reactions and Read Message History there; check the channel's permissions."
+
+	SetupNoteAnnounce = "A stream already announced keeps being updated in the channel it was posted in. The recap and tweets follow this channel unless they have their own."
+	SetupNoteReview   = "Candidates already waiting keep their buttons where they are; new ones go here."
+	SetupNoteOps      = "The heartbeat posts a fresh message there on its next beat; the old one stays where it was."
+	SetupNoteStaff    = "Dev commands and /collab now work only in %s. Review, ops and the Saturday reminder follow it unless they have their own channel."
+	SetupNoteReminder = "The Saturday reminder goes here from now on."
+	SetupNotePing     = "This one role is pinged both for a waiting room and when she goes live. It must allow \"anyone can mention this role\", or the ping will not notify anyone."
+	SetupNoteReviewer = "Only members with this role can press Confirm and Ignore now."
+
+	SetupNoteFansRestart = "The bot did not ask Discord for message content when it started, so it cannot read this channel yet. Turn on Message Content Intent in the Developer Portal (Bot > Privileged Gateway Intents), then restart the bot once. After that it works without restarts."
+	SetupNoteFansNoYT    = "Collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID), so this channel does nothing yet."
+
+	SetupWarnFansRestart = "Fan channel: set, but the bot is not reading message content yet. It needs the Message Content Intent switched on in the Developer Portal and one restart."
+	SetupWarnFansNoYT    = "Fan channel: set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID)."
+)

@@ -74,8 +74,52 @@ type Deps struct {
 	// LinkChannelID is the fan channel where links are read from messages.
 	LinkChannelID string
 
+	// These three are asked each time when set (so /setup can change them while the bot runs) and replace the fixed IDs of the same name.
+	DevChannel  func() string
+	LinkChannel func() string
+	ReviewRole  func() string
+
+	// Settings is what /setup changes. Nil: /setup says it is not available.
+	Settings SettingsAdmin
+
+	// ListeningForMessages says whether the bot asked Discord for the Message Content intent when it connected. A fan channel set later by /setup needs one restart before it works if this is false.
+	ListeningForMessages bool
+
 	// ReviewRoleID is the role that may press Confirm and Ignore. When it is empty, members with Manage Server or Administrator may instead.
 	ReviewRoleID string
+}
+
+// devChannel, linkChannel and reviewRole are what the deps say right now.
+func (r *Router) devChannel() string {
+	if r.deps.DevChannel != nil {
+		return r.deps.DevChannel()
+	}
+	return r.deps.DevChannelID
+}
+
+// inDevChannel says whether the command was typed in the staff channel, the only place the dev commands and /collab work.
+func (r *Router) inDevChannel(i *discordgo.InteractionCreate) bool {
+	dev := r.devChannel()
+	return dev != "" && i.ChannelID == dev
+}
+
+// mayReview says whether this member may press the review buttons right now.
+func (r *Router) mayReview(m *discordgo.Member) bool {
+	return canReview(m, r.reviewRole())
+}
+
+func (r *Router) linkChannel() string {
+	if r.deps.LinkChannel != nil {
+		return r.deps.LinkChannel()
+	}
+	return r.deps.LinkChannelID
+}
+
+func (r *Router) reviewRole() string {
+	if r.deps.ReviewRole != nil {
+		return r.deps.ReviewRole()
+	}
+	return r.deps.ReviewRoleID
 }
 
 // Rodoker counts and limits /rodok. *rodok.Service satisfies it.
@@ -190,6 +234,9 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 			Required:    true,
 		}},
 	}, r.handleCollabLink)
+
+	// /setup is for people with Manage Server; it changes channels and roles while the bot runs.
+	r.addSetup()
 
 	// /rodok is for everyone and works in any channel.
 	r.add(&discordgo.ApplicationCommand{
@@ -328,7 +375,7 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 	case r.deps.Outside == nil:
 		_ = replyPrivate(s, i, msg.CollabReviewOff)
 		return
-	case !canReview(i.Member, r.deps.ReviewRoleID):
+	case !r.mayReview(i.Member):
 		_ = replyPrivate(s, i, msg.CollabReviewDenied)
 		return
 	}
@@ -387,7 +434,7 @@ func (r *Router) handleRodok(s *discordgo.Session, i *discordgo.InteractionCreat
 	return replyPrivate(s, i, text)
 }
 
-// rodokAnswer decides what to say. public is false for a refusal. An error only means the count could not be saved; the text is still right.
+// rodokAnswer decides what to say. public is false only for the spam messages and the "not in a server" case. An error only means the count could not be saved; the text is still right.
 func rodokAnswer(r Rodoker, actor, target string, targetIsBot bool) (text string, public bool, err error) {
 	if actor == "" || target == "" { // a direct message: there is no server member
 		return msg.RodokGuildOnly, false, nil
@@ -478,7 +525,7 @@ func channelAnswer(r outside.Reply) (reaction, reply string) {
 
 // fanMessage says whether a message is one the fan channel should read, and who sent it. Bots (this one included) and every other channel are skipped.
 func (r *Router) fanMessage(m *discordgo.MessageCreate) (who, name string, ok bool) {
-	if m == nil || m.Message == nil || r.deps.LinkChannelID == "" || m.ChannelID != r.deps.LinkChannelID || r.deps.Outside == nil {
+	if m == nil || m.Message == nil || r.linkChannel() == "" || m.ChannelID != r.linkChannel() || r.deps.Outside == nil {
 		return "", "", false
 	}
 	if m.Author == nil || m.Author.Bot {
@@ -535,7 +582,7 @@ func handlePing(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 
 // handleDevStream feeds one fake stream to the announcer in the chosen state.
 func (r *Router) handleDevStream(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.ChannelID != r.deps.DevChannelID {
+	if !r.inDevChannel(i) {
 		return reply(s, i, msg.DevOnly)
 	}
 
@@ -565,7 +612,7 @@ func (r *Router) handleDevStream(s *discordgo.Session, i *discordgo.InteractionC
 
 // handleDevCheck fetches her recent streams from YouTube and lists them in the reply. Pass another channel ID to try the same on any channel.
 func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.ChannelID != r.deps.DevChannelID {
+	if !r.inDevChannel(i) {
 		return reply(s, i, msg.DevOnly)
 	}
 	if r.deps.Source == nil {
@@ -603,7 +650,7 @@ func (r *Router) handleDevCheck(s *discordgo.Session, i *discordgo.InteractionCr
 
 // handleDevRecap posts the recap of the chosen week into this channel.
 func (r *Router) handleDevRecap(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.ChannelID != r.deps.DevChannelID {
+	if !r.inDevChannel(i) {
 		return reply(s, i, msg.DevOnly)
 	}
 	if r.deps.Recap == nil {
@@ -628,7 +675,7 @@ func (r *Router) handleDevRecap(s *discordgo.Session, i *discordgo.InteractionCr
 
 // handleDevRemind posts this week's collab reminder into this channel.
 func (r *Router) handleDevRemind(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.ChannelID != r.deps.DevChannelID {
+	if !r.inDevChannel(i) {
 		return reply(s, i, msg.DevOnly)
 	}
 	if r.deps.Reminder == nil {
@@ -650,7 +697,7 @@ const maxChoices = 25
 
 // collabChoices offers what fits the option being typed: streams for "stream", partners and teams for "add" and "remove". Only in the dev channel.
 func (r *Router) collabChoices(i *discordgo.InteractionCreate) []*discordgo.ApplicationCommandOptionChoice {
-	if r.deps.Collab == nil || i.ChannelID != r.deps.DevChannelID {
+	if r.deps.Collab == nil || !r.inDevChannel(i) {
 		return nil
 	}
 	for _, opt := range i.ApplicationCommandData().Options {
@@ -715,7 +762,7 @@ func nameChoices(prefix string, suggestions []partners.Suggestion) []*discordgo.
 
 // handleCollab tags a stream: who was there, and who was not.
 func (r *Router) handleCollab(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	if i.ChannelID != r.deps.DevChannelID {
+	if !r.inDevChannel(i) {
 		return reply(s, i, msg.DevOnly)
 	}
 	if r.deps.Collab == nil {

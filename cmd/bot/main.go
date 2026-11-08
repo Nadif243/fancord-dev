@@ -29,6 +29,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/recap"
 	"github.com/Nadif243/fancord-bot/internal/relay"
 	"github.com/Nadif243/fancord-bot/internal/rodok"
+	"github.com/Nadif243/fancord-bot/internal/settings"
 	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
@@ -101,12 +102,23 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("rodok file ready", "path", cfg.RodokFile)
+
+	// The channels and roles the bot uses. What /setup saved beats .env, and everything below asks this each time it posts, so a change applies at once.
+	live, err := settings.Open(cfg.SettingsFile, cfg.Written)
+	if err != nil {
+		return err
+	}
+	log.Info("settings file ready", "path", cfg.SettingsFile)
+	channel := func(k settings.Key) func() string { return func() string { return live.Get(k) } }
+
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
-		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
+		WithChannel(channel(settings.Announce)).
+		WithPingFuncs(live.PingUpcoming, live.PingLive)
 
 	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
 	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory()).
-		WithPings(cfg.Pings.Upcoming, cfg.Pings.Live)
+		WithChannel(channel(settings.Staff)).
+		WithPingFuncs(live.PingUpcoming, live.PingLive)
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource
@@ -138,7 +150,8 @@ func run(log *slog.Logger) error {
 		who := collabs.NewService(book, tags, streams)
 		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log).
 			WithPartners(who, cfg.Channels.Ops).
-			WithReminder(cfg.Channels.Test, memory)
+			WithReminder(cfg.Channels.Test, memory).
+			WithLiveChannels(channel(settings.Recap), channel(settings.Ops), channel(settings.Reminder))
 		collab = who
 
 		decisions, err := outside.OpenFile(cfg.Review.File)
@@ -148,6 +161,7 @@ func run(log *slog.Logger) error {
 		log.Info("collab review file ready", "path", cfg.Review.File)
 		review = outside.New(decisions, yt, messenger, book, outside.Settings{
 			ChannelID:      cfg.Channels.Approval,
+			ChannelFn:      channel(settings.Review),
 			OwnChannelID:   cfg.YouTube.ChannelID,
 			MentionWords:   cfg.Review.MentionWords,
 			IgnoreChannels: cfg.Review.IgnoreChannels,
@@ -169,6 +183,7 @@ func run(log *slog.Logger) error {
 		remindPreview = recapService
 	}
 
+	listening := reviewer != nil && live.Get(settings.Fans) != ""
 	router := discord.NewRouter(log, discord.Deps{
 		DevAnnouncer:     devAnnouncer,
 		DevChannelID:     cfg.Channels.Test,
@@ -179,17 +194,22 @@ func run(log *slog.Logger) error {
 		Collab:           collab,
 		Outside:          reviewer,
 		Rodok:            rodok.New(rodokCounts),
-		LinkChannelID:    cfg.Channels.CollabLinks,
-		ReviewRoleID:     cfg.Review.RoleID,
+		DevChannel:       channel(settings.Staff),
+		LinkChannel:      channel(settings.Fans),
+		ReviewRole:       channel(settings.Reviewer),
+		Settings:         live,
+		// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents). Asking for it without that switch makes Discord refuse the connection, so it is asked for only when a fan channel is set at start. A channel set later by /setup then needs one restart.
+		ListeningForMessages: listening,
 	})
 	s.AddHandler(router.OnInteraction)
-	if reviewer != nil && cfg.Channels.CollabLinks != "" {
-		// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents). Asking for it without that switch makes Discord refuse the connection, so it is asked for only when the fan channel is set.
+	if reviewer != nil {
+		s.AddHandler(router.OnMessage) // it ignores every channel but the fan channel
+	}
+	if listening {
 		s.Identify.Intents |= intentGuildMessages | intentMessageContent
-		s.AddHandler(router.OnMessage)
-		log.Info("fan collab-link channel is on", "channel", cfg.Channels.CollabLinks)
-	} else if cfg.Channels.CollabLinks != "" {
-		log.Warn("CHANNEL_COLLAB_LINKS is set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID); the channel is ignored")
+		log.Info("fan collab-link channel is on", "channel", live.Get(settings.Fans))
+	} else if live.Get(settings.Fans) != "" {
+		log.Warn("a fan collab-link channel is set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID); the channel is ignored")
 	}
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
 		log.Info("connected to Discord", "bot", r.User.Username)
@@ -200,7 +220,7 @@ func run(log *slog.Logger) error {
 	}
 	defer s.Close()
 
-	// Find the server from the test channel, unless GUILD_ID was given.
+	// Find the server from the test channel in .env (never a /setup change, so a deleted channel cannot stop the bot from starting), unless GUILD_ID was given.
 	guildID := cfg.GuildID
 	if guildID == "" {
 		ch, err := s.Channel(cfg.Channels.Test)
@@ -237,6 +257,8 @@ func run(log *slog.Logger) error {
 			Username:   cfg.X.Username,
 			ChannelID:  cfg.Channels.Tweets,
 			OpsID:      cfg.Channels.Ops,
+			ChannelFn:  channel(settings.Tweets),
+			OpsFn:      channel(settings.Ops),
 			Every:      cfg.X.PollEvery,
 			Kinds:      kinds,
 			MonthlyCap: cfg.X.MonthlyCap,
@@ -252,11 +274,13 @@ func run(log *slog.Logger) error {
 		log.Info("tweet relay is off: set X_BEARER_TOKEN to turn it on")
 	}
 
-	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).Run)
+	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).
+		WithChannel(channel(settings.Ops)).Run)
 
 	if pollerOn {
 		// Writes down "still running" every few minutes; after the first YouTube check of a start it tells the ops channel what happened while off.
-		back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log)
+		back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log).
+			WithOps(channel(settings.Ops))
 		start(back.Run)
 		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
 			OnFirstCheck(back.FirstCheckDone).Run)

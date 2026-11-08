@@ -62,12 +62,15 @@ type Sender interface {
 
 // Settings are what the relay is configured with.
 type Settings struct {
-	Username   string        // her handle, without the @
-	ChannelID  string        // where the posts go
-	OpsID      string        // where warnings go; empty: log only
-	Every      time.Duration // how often to check X
-	Kinds      []xapi.Kind   // which post types to relay
-	MonthlyCap int           // billed reads per month; 0 means no cap
+	Username  string // her handle, without the @
+	ChannelID string // where the posts go
+	OpsID     string // where warnings go; empty: log only
+
+	// When set, these are asked each time instead of the two fixed IDs above, so the channels can be changed while the bot runs.
+	ChannelFn, OpsFn func() string
+	Every            time.Duration // how often to check X
+	Kinds            []xapi.Kind   // which post types to relay
+	MonthlyCap       int           // billed reads per month; 0 means no cap
 }
 
 const (
@@ -109,7 +112,7 @@ func (r *Relay) OnLinks(f func(postID string, videoIDs []string)) { r.onLinks = 
 
 // Run checks once at the start, then every interval, until ctx ends.
 func (r *Relay) Run(ctx context.Context) {
-	r.log.Info("tweet relay is on", "account", "@"+r.set.Username, "channel", r.set.ChannelID,
+	r.log.Info("tweet relay is on", "account", "@"+r.set.Username, "channel", r.channel(),
 		"every", r.set.Every, "kinds", r.set.Kinds, "monthly_read_cap", r.set.MonthlyCap)
 	r.Check(ctx)
 	ticker := time.NewTicker(r.set.Every)
@@ -213,7 +216,7 @@ func (r *Relay) round(ctx context.Context) error {
 			continue // the API should not repeat, but a repeat must not be posted twice
 		}
 		if slices.Contains(r.set.Kinds, p.Kind) {
-			if _, err := r.send.Send(r.set.ChannelID, msg.TweetRelay(string(p.Kind), r.postURL(p.ID))); err != nil {
+			if _, err := r.send.Send(r.channel(), msg.TweetRelay(string(p.Kind), r.postURL(p.ID))); err != nil {
 				return fmt.Errorf("post %s to Discord: %w", p.ID, err) // not marked handled: tried again next round
 			}
 		}
@@ -251,11 +254,22 @@ func (r *Relay) save(st State) error {
 	return nil
 }
 
+func (r *Relay) channel() string {
+	if r.set.ChannelFn != nil {
+		return r.set.ChannelFn()
+	}
+	return r.set.ChannelID
+}
+
 func (r *Relay) ops(text string) {
-	if r.set.OpsID == "" {
+	opsID := r.set.OpsID
+	if r.set.OpsFn != nil {
+		opsID = r.set.OpsFn()
+	}
+	if opsID == "" {
 		return
 	}
-	if _, err := r.send.Send(r.set.OpsID, text); err != nil {
+	if _, err := r.send.Send(opsID, text); err != nil {
 		r.log.Warn("tweet relay: could not post the ops note", "err", err)
 	}
 }

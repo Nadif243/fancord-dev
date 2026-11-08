@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/Nadif243/fancord-bot/internal/settings"
 )
 
 // A Discord ID ("snowflake") is a number of 17 to 20 digits.
@@ -24,6 +26,7 @@ const (
 	defaultPartnersFile     = "partners.csv"
 	defaultCollabFile       = "data/collabs.json"
 	defaultRodokFile        = "data/rodok.json"
+	defaultSettingsFile     = "data/settings.json"
 	defaultXFanLookupCap    = 20
 	defaultOutsideFile      = "data/outside.json"
 	defaultMentionWords     = "yuura,yozakura"
@@ -49,6 +52,9 @@ type Channels struct {
 
 	// CollabLinks is where fans send collab links as ordinary messages. Empty means off; it needs the Message Content intent (see .env.example).
 	CollabLinks string
+
+	// Reminder is the Saturday reminder's own channel. Empty: the staff channel (Test), where it always went before.
+	Reminder string
 }
 
 // X holds the settings for relaying her X posts. Without a token the relay is simply off.
@@ -82,6 +88,9 @@ type YouTube struct {
 type Pings struct {
 	Upcoming string // a new waiting room appeared
 	Live     string // a stream went live
+
+	// Both is one role for both; the two above, when set, win over it.
+	Both string
 }
 
 type Config struct {
@@ -90,6 +99,7 @@ type Config struct {
 	PartnersFile   string // the collab partner list (CSV) the recap reads
 	CollabFile     string // who people tagged as being in a stream, by hand
 	RodokFile      string // how many times each person has used /rodok on each other person
+	SettingsFile   string // what /setup saved; it beats .env for channels and roles
 	Token          string
 	AppID          string
 	GuildID        string // optional: found from Channels.Test when empty
@@ -99,6 +109,9 @@ type Config struct {
 	X              X
 	Review         Review
 	HeartbeatEvery time.Duration
+
+	// Written is what .env says for the things /setup can change, exactly as written (no defaults filled in). The settings package adds its own defaults and the saved /setup values on top.
+	Written settings.Env
 }
 
 // Load validates every setting and reports all problems at once, so you fix the .env file in one go instead of one error per run.
@@ -143,8 +156,10 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Channels.Recap = optionalID("CHANNEL_RECAP", c.Channels.Announce)
 	c.Channels.Tweets = optionalID("CHANNEL_TWEETS", c.Channels.Announce)
 	c.Channels.CollabLinks = optionalID("CHANNEL_COLLAB_LINKS", "")
+	c.Channels.Reminder = optionalID("CHANNEL_REMINDER", "")
 	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
+	c.Pings.Both = optionalID("ROLE_PING", "")
 
 	// The key is never repeated in an error message, whatever is wrong with it.
 	c.YouTube.APIKey = get("YOUTUBE_API_KEY")
@@ -174,6 +189,22 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 
 	c.Review.RoleID = optionalID("ROLE_COLLAB_REVIEW", "")
+	c.Written = settings.Env{
+		Values: map[settings.Key]string{
+			settings.Announce: get("CHANNEL_ANNOUNCE"),
+			settings.Tweets:   get("CHANNEL_TWEETS"),
+			settings.Recap:    get("CHANNEL_RECAP"),
+			settings.Fans:     get("CHANNEL_COLLAB_LINKS"),
+			settings.Review:   get("CHANNEL_APPROVAL"),
+			settings.Ops:      get("CHANNEL_OPS"),
+			settings.Staff:    get("CHANNEL_TEST"),
+			settings.Reminder: get("CHANNEL_REMINDER"),
+			settings.Ping:     get("ROLE_PING"),
+			settings.Reviewer: get("ROLE_COLLAB_REVIEW"),
+		},
+		PingUpcoming: c.Pings.Upcoming,
+		PingLive:     c.Pings.Live,
+	}
 	c.Review.File = get("OUTSIDE_FILE")
 	if c.Review.File == "" {
 		c.Review.File = defaultOutsideFile
@@ -200,6 +231,11 @@ func Load(getenv func(string) string) (Config, error) {
 	c.CollabFile = get("COLLAB_FILE")
 	if c.CollabFile == "" {
 		c.CollabFile = defaultCollabFile
+	}
+
+	c.SettingsFile = get("SETTINGS_FILE")
+	if c.SettingsFile == "" {
+		c.SettingsFile = defaultSettingsFile
 	}
 
 	c.RodokFile = get("RODOK_FILE")

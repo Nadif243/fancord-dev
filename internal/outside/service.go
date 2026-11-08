@@ -76,10 +76,11 @@ type Announcer interface {
 
 // Settings are the choices from the config.
 type Settings struct {
-	ChannelID      string   // where the review messages go
-	OwnChannelID   string   // her channel: its videos are not "other channels"
-	MentionWords   []string // words that show a video is about her
-	IgnoreChannels []string // channel IDs that are never shown
+	ChannelID      string        // where the review messages go
+	ChannelFn      func() string // when set, asked each time instead of ChannelID
+	OwnChannelID   string        // her channel: its videos are not "other channels"
+	MentionWords   []string      // words that show a video is about her
+	IgnoreChannels []string      // channel IDs that are never shown
 }
 
 type queued struct{ source, ref string }
@@ -163,7 +164,7 @@ func (s *Service) Seed(links []relay.Link) {
 
 // Run works until ctx ends: it looks up what is in line and posts what is waiting for a review message.
 func (s *Service) Run(ctx context.Context) {
-	s.log.Info("collab review is on", "channel", s.set.ChannelID)
+	s.log.Info("collab review is on", "channel", s.reviewChannel())
 	ticker := time.NewTicker(tickEvery)
 	defer ticker.Stop()
 	for {
@@ -281,13 +282,20 @@ func (s *Service) partners(v youtube.Video) []string {
 	return out
 }
 
+func (s *Service) reviewChannel() string {
+	if s.set.ChannelFn != nil {
+		return s.set.ChannelFn()
+	}
+	return s.set.ChannelID
+}
+
 // postWaiting posts the review message of every pending item that has none (new ones, and ones whose post failed before).
 func (s *Service) postWaiting() {
 	for _, it := range s.file.Items() {
 		if it.Status != Pending || it.MessageID != "" {
 			continue
 		}
-		id, err := s.post.Post(s.set.ChannelID, Text(it), Buttons(it.VideoID, it.ChannelID != ""))
+		id, err := s.post.Post(s.reviewChannel(), Text(it), Buttons(it.VideoID, it.ChannelID != ""))
 		if err != nil {
 			s.log.Warn("collab review: could not post the review message, will try again", "video", it.VideoID, "err", err)
 			return

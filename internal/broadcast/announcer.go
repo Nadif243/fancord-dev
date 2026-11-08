@@ -21,6 +21,9 @@ type Announced struct {
 	MessageID string
 	State     State
 	Text      string
+
+	// ChannelID is where the message was posted, so it is still edited there if the announcement channel is changed meanwhile. Empty in records from before this was kept: the current channel is used for those.
+	ChannelID string
 }
 
 // Memory is where the announcer keeps what it has posted. It is an interface so the real bot can use a file (package store) and tests a fake.
@@ -33,22 +36,37 @@ type Memory interface {
 
 // Announcer posts ONE message per stream and edits that same message as the stream moves from upcoming to live to ended.
 type Announcer struct {
-	m         Messenger
-	channelID string
-	mem       Memory
+	m       Messenger
+	channel func() string // where new announcements go, asked each time
+	mem     Memory
 
-	upcomingRole, liveRole string // roles to ping; "" means no ping
+	// The roles to ping, asked each time; "" means no ping.
+	upcomingRole, liveRole func() string
 
 	mu sync.Mutex // Discord runs each command in its own goroutine; one Update at a time
 }
 
 func NewAnnouncer(m Messenger, channelID string, mem Memory) *Announcer {
-	return &Announcer{m: m, channelID: channelID, mem: mem}
+	return &Announcer{m: m, channel: constant(channelID), mem: mem, upcomingRole: constant(""), liveRole: constant("")}
+}
+
+func constant(s string) func() string { return func() string { return s } }
+
+// WithChannel makes the announcer ask where to post each time (so the channel can be changed while the bot runs) instead of using the one it was made with.
+func (a *Announcer) WithChannel(channel func() string) *Announcer {
+	a.channel = channel
+	return a
+}
+
+// WithPingFuncs is WithPings for roles that can change while the bot runs.
+func (a *Announcer) WithPingFuncs(upcomingRole, liveRole func() string) *Announcer {
+	a.upcomingRole, a.liveRole = upcomingRole, liveRole
+	return a
 }
 
 // WithPings sets the roles to ping: upcomingRole when a new waiting room appears, liveRole when a stream goes live. An empty ID switches that ping off.
 func (a *Announcer) WithPings(upcomingRole, liveRole string) *Announcer {
-	a.upcomingRole, a.liveRole = upcomingRole, liveRole
+	a.upcomingRole, a.liveRole = constant(upcomingRole), constant(liveRole)
 	return a
 }
 
@@ -73,14 +91,15 @@ func (a *Announcer) Update(s Stream) error {
 		return nil // first seen when already over: nothing worth announcing
 
 	case !seen:
-		id, err := a.m.Send(a.channelID, text)
+		ch := a.channel()
+		id, err := a.m.Send(ch, text)
 		if err != nil {
 			return err // not remembered, so the next Update tries again
 		}
-		if err := a.remember(s, id, text); err != nil {
+		if err := a.remember(s, ch, id, text); err != nil {
 			return err
 		}
-		return a.ping(s)
+		return a.ping(s, ch)
 
 	case s.State < prev.State:
 		return nil // stale information: streams only move forward
@@ -89,45 +108,50 @@ func (a *Announcer) Update(s Stream) error {
 		return nil // nothing changed, so do not touch Discord
 
 	default:
-		if err := a.m.Edit(a.channelID, prev.MessageID, text); err != nil {
+		ch := prev.ChannelID // where it was posted, even if the channel was changed since
+		if ch == "" {
+			ch = a.channel()
+		}
+		if err := a.m.Edit(ch, prev.MessageID, text); err != nil {
 			return err
 		}
-		if err := a.remember(s, prev.MessageID, text); err != nil {
+		if err := a.remember(s, ch, prev.MessageID, text); err != nil {
 			return err
 		}
 		if s.State != prev.State {
-			return a.ping(s)
+			return a.ping(s, ch)
 		}
 		return nil
 	}
 }
 
 // ping mentions a role for the state the stream has just entered. It runs after the announcement is saved, so a failed ping is never retried: better one missed ping than the same ping twice.
-func (a *Announcer) ping(s Stream) error {
+func (a *Announcer) ping(s Stream, channelID string) error {
+	upcoming, live := a.upcomingRole(), a.liveRole() // read once, so one ping uses one answer
 	var text, role string
 	switch {
-	case s.Channel != "" && s.State == Upcoming && a.upcomingRole != "":
-		role, text = a.upcomingRole, msg.PingCollabUpcoming(a.upcomingRole, s.Title, s.Channel, s.URL(), s.StartAt, s.Kind == KindPremiere)
-	case s.Channel != "" && s.State == Live && a.liveRole != "":
-		role, text = a.liveRole, msg.PingCollabLive(a.liveRole, s.Title, s.Channel, s.URL(), s.Kind == KindPremiere)
+	case s.Channel != "" && s.State == Upcoming && upcoming != "":
+		role, text = upcoming, msg.PingCollabUpcoming(upcoming, s.Title, s.Channel, s.URL(), s.StartAt, s.Kind == KindPremiere)
+	case s.Channel != "" && s.State == Live && live != "":
+		role, text = live, msg.PingCollabLive(live, s.Title, s.Channel, s.URL(), s.Kind == KindPremiere)
 	case s.Channel != "":
-		return nil // collabs on other channels are announced without pings
-	case s.State == Upcoming && a.upcomingRole != "":
-		role, text = a.upcomingRole, msg.PingUpcoming(a.upcomingRole, s.Title, s.URL(), s.StartAt)
-	case s.State == Live && a.liveRole != "":
-		role, text = a.liveRole, msg.PingLive(a.liveRole, s.Title, s.URL())
+		return nil
+	case s.State == Upcoming && upcoming != "":
+		role, text = upcoming, msg.PingUpcoming(upcoming, s.Title, s.URL(), s.StartAt)
+	case s.State == Live && live != "":
+		role, text = live, msg.PingLive(live, s.Title, s.URL())
 	default:
 		return nil
 	}
-	if err := a.m.Ping(a.channelID, text, role); err != nil {
+	if err := a.m.Ping(channelID, text, role); err != nil {
 		return fmt.Errorf("announced %s but could not ping: %w", s.VideoID, err)
 	}
 	return nil
 }
 
 // remember records what is now on Discord. If saving fails the message is still posted, so the error says so.
-func (a *Announcer) remember(s Stream, messageID, text string) error {
-	rec := Announced{MessageID: messageID, State: s.State, Text: text}
+func (a *Announcer) remember(s Stream, channelID, messageID, text string) error {
+	rec := Announced{MessageID: messageID, State: s.State, Text: text, ChannelID: channelID}
 	if err := a.mem.Put(s.VideoID, rec); err != nil {
 		return fmt.Errorf("announced %s but could not save it: %w", s.VideoID, err)
 	}

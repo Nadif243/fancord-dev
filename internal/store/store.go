@@ -23,6 +23,8 @@ type record struct {
 	MessageID string `json:"messageId"`
 	State     int    `json:"state"`
 	Text      string `json:"text"`
+	// ChannelID is where the message was posted. Older files do not have it (the current channel is used then), so it is optional and the format version stays 1.
+	ChannelID string `json:"channel,omitempty"`
 }
 
 type fileData struct {
@@ -86,14 +88,14 @@ func (f *File) Get(videoID string) (broadcast.Announced, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r, ok := f.data.Announced[videoID]
-	return broadcast.Announced{MessageID: r.MessageID, State: broadcast.State(r.State), Text: r.Text}, ok
+	return broadcast.Announced{MessageID: r.MessageID, State: broadcast.State(r.State), Text: r.Text, ChannelID: r.ChannelID}, ok
 }
 
 // Put remembers the record and then saves the file. If saving fails the record is still remembered for this run, and the error is returned.
 func (f *File) Put(videoID string, a broadcast.Announced) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.data.Announced[videoID] = record{MessageID: a.MessageID, State: int(a.State), Text: a.Text}
+	f.data.Announced[videoID] = record{MessageID: a.MessageID, State: int(a.State), Text: a.Text, ChannelID: a.ChannelID}
 	return f.save()
 }
 

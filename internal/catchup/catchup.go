@@ -54,12 +54,19 @@ type Reporter struct {
 	ann     Announcements
 	send    Sender
 	opsID   string
+	opsFn   func() string // when set, asked each time instead of opsID
 	log     *slog.Logger
 	now     func() time.Time
 
 	// prev is when the bot was last running before THIS start. It is read once in New, before Run starts overwriting the marker.
 	prev time.Time
 	once sync.Once
+}
+
+// WithOps makes the reporter ask where to post each time, so the channel can be changed while the bot runs.
+func (r *Reporter) WithOps(ops func() string) *Reporter {
+	r.opsFn = ops
+	return r
 }
 
 // New makes a Reporter. opsID is the channel for the note; empty means the note is only logged.
@@ -118,11 +125,15 @@ func (r *Reporter) report() {
 	}
 	r.log.Info("back online", "off_for", gap.Round(time.Second).String(), "ended_meanwhile", len(missed), "not_announced", notAnnounced)
 
-	if r.opsID == "" || (len(missed) == 0 && gap < reportGap) {
+	opsID := r.opsID
+	if r.opsFn != nil {
+		opsID = r.opsFn()
+	}
+	if opsID == "" || (len(missed) == 0 && gap < reportGap) {
 		return // a quick restart (an update, say) is not worth a message
 	}
 	for _, text := range msg.BackOnline(r.prev, now, missed) {
-		if _, err := r.send.Send(r.opsID, text); err != nil {
+		if _, err := r.send.Send(opsID, text); err != nil {
 			r.log.Warn("could not post the back-online note", "err", err)
 			return
 		}

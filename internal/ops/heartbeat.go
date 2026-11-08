@@ -19,6 +19,7 @@ type Messenger interface {
 type Heartbeat struct {
 	m         Messenger
 	channelID string
+	channelFn func() string // when set, asked each time instead of channelID
 	version   string
 	every     time.Duration
 	log       *slog.Logger
@@ -27,6 +28,19 @@ type Heartbeat struct {
 
 func NewHeartbeat(m Messenger, channelID, version string, every time.Duration, log *slog.Logger) *Heartbeat {
 	return &Heartbeat{m: m, channelID: channelID, version: version, every: every, log: log, now: time.Now}
+}
+
+// WithChannel makes the heartbeat ask where to post each time. After a change the next beat cannot edit the old message in the new channel, so it posts a fresh one there (update already does that when an edit fails).
+func (h *Heartbeat) WithChannel(channel func() string) *Heartbeat {
+	h.channelFn = channel
+	return h
+}
+
+func (h *Heartbeat) channel() string {
+	if h.channelFn != nil {
+		return h.channelFn()
+	}
+	return h.channelID
 }
 
 // Run blocks until ctx is cancelled, then marks the message Offline.
@@ -48,7 +62,7 @@ func (h *Heartbeat) Run(ctx context.Context) {
 }
 
 func (h *Heartbeat) post(content string) string {
-	id, err := h.m.Send(h.channelID, content)
+	id, err := h.m.Send(h.channel(), content)
 	if err != nil {
 		h.log.Error("heartbeat: could not post", "err", err)
 		return ""
@@ -59,7 +73,7 @@ func (h *Heartbeat) post(content string) string {
 // update edits the heartbeat message. If it cannot (someone deleted or the first post failed) it posts a fresh one and returns the new ID.
 func (h *Heartbeat) update(id, content string) string {
 	if id != "" {
-		err := h.m.Edit(h.channelID, id, content)
+		err := h.m.Edit(h.channel(), id, content)
 		if err == nil {
 			return id
 		}

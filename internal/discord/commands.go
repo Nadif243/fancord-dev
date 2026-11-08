@@ -370,7 +370,7 @@ func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.Interaction
 	return replyPrivate(s, i, linkText(r.submit(false, userKey(i), userName(i), text)))
 }
 
-// handleRodok answers "A merodok B Nx". The answer is public but pings nobody (see reply). Refusals are private, so a refused try does not fill the channel.
+// handleRodok answers "A merodok B Nx". Answers are public but ping nobody (see reply). The playful refusals for self and bot are public too, like the normal answer; only the spam messages (cooldown, lockout) are private, so a spammer does not fill the channel.
 func (r *Router) handleRodok(s *discordgo.Session, i *discordgo.InteractionCreate) error {
 	if r.deps.Rodok == nil {
 		return replyPrivate(s, i, msg.CollabLinkOff)
@@ -394,10 +394,10 @@ func rodokAnswer(r Rodoker, actor, target string, targetIsBot bool) (text string
 	}
 	// These two are refused before the limiter, so they use up nothing.
 	if target == actor {
-		return msg.RodokSelf, false, nil
+		return msg.RodokSelf, true, nil
 	}
 	if targetIsBot {
-		return msg.RodokBot, false, nil
+		return msg.RodokBot, true, nil
 	}
 
 	res, err := r.Do(actor, target)

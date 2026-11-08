@@ -18,6 +18,9 @@ const (
 
 	// The longest one check may take, however slow YouTube is.
 	checkTimeout = 30 * time.Second
+
+	// An announced waiting room that is missing from this many checks in a row/ is taken to be gone. More than one, so a single odd answer from YouTube cannot cancel a real one.
+	vanishedAfter = 3
 )
 
 // Source lists a channel's recent streams. *youtube.Client satisfies it.
@@ -36,6 +39,12 @@ type Announcer interface {
 	Knows(videoID string) bool // is there already an announcement for it?
 }
 
+// Canceller is what the announcer offers for tidying up a waiting room that is gone. *broadcast.Announcer satisfies it; an Announcer without it is fine.
+type Canceller interface {
+	Waiting() []string
+	Cancel(videoID string) error
+}
+
 type Poller struct {
 	source    Source
 	announcer Announcer
@@ -49,13 +58,14 @@ type Poller struct {
 	first   func()          // runs once, after the first check that worked; may be nil
 	checked bool            // has one check succeeded yet?
 	warned  map[string]bool // notes already logged, so they are not repeated every time
+	missing map[string]int  // announced waiting rooms: checks in a row without finding them
 }
 
 func New(source Source, announcer Announcer, recorder Recorder, channelID string, every time.Duration, log *slog.Logger) *Poller {
 	return &Poller{
 		source: source, announcer: announcer, recorder: recorder, channelID: channelID,
 		every: every, log: log, now: time.Now,
-		warned: map[string]bool{},
+		warned: map[string]bool{}, missing: map[string]int{},
 	}
 }
 
@@ -118,6 +128,8 @@ func (p *Poller) check(parent context.Context) {
 		}
 	}
 
+	p.tidy(scan, now)
+
 	if !p.checked {
 		p.checked = true
 		p.log.Info("first youtube check done",
@@ -130,12 +142,46 @@ func (p *Poller) check(parent context.Context) {
 	}
 }
 
-// worthAnnouncing is the bot's policy on what counts. (Whether a stream that is already over gets a message is the announcer's decision, not ours.)
+// tidy cancels the announcement of a waiting room that is no longer there: deleted or cancelled on YouTube, or abandoned (its start time long past and it never went live).
+func (p *Poller) tidy(scan broadcast.Scan, now time.Time) {
+	c, ok := p.announcer.(Canceller)
+	if !ok || scan.Checked == 0 {
+		return // an empty look says nothing about what exists
+	}
+	here := map[string]bool{}
+	for _, st := range scan.Streams {
+		if st.State == broadcast.Upcoming && abandoned(st, now) {
+			continue
+		}
+		here[st.VideoID] = true
+	}
+	missing := map[string]int{}
+	for _, id := range c.Waiting() {
+		if here[id] {
+			continue
+		}
+		missing[id] = p.missing[id] + 1
+		if missing[id] < vanishedAfter {
+			continue
+		}
+		if err := c.Cancel(id); err != nil {
+			p.log.Warn("cancelling a vanished waiting room failed, will try again", "video", id, "err", err)
+			continue
+		}
+		p.log.Info("a waiting room is gone; its announcement was marked cancelled", "video", id)
+		delete(missing, id)
+	}
+	p.missing = missing
+}
+
+// abandoned says a waiting room's start time passed long ago.
+func abandoned(st broadcast.Stream, now time.Time) bool {
+	return !st.StartAt.IsZero() && st.StartAt.Before(now.Add(-staleAfter))
+}
+
+// worthAnnouncing is the bot's policy on what counts. (Whether a stream that already over gets a message is the announcer's decision, not ours.)
 //
-// known says the stream already has an announcement. Then it was judged to be
-// a stream while it was still upcoming or live, which is more reliable than
-// the guess made once it is over (a stream that just ended may not be on the
-// Live tab list yet, and would look like a premiere). So it keeps being updated.
+// known says the stream already has an announcement. Then it was judged to be a stream while it was still upcoming or live, which is more reliable than the guess made once it is over (a stream that just ended may not be on the Live tab list yet, and would look like a premiere). So it keeps being updated.
 func worthAnnouncing(st broadcast.Stream, now time.Time, known bool) bool {
 	if st.Kind == broadcast.KindPremiere && !known {
 		return false // a video release, not a stream
@@ -144,7 +190,7 @@ func worthAnnouncing(st broadcast.Stream, now time.Time, known bool) bool {
 		if st.StartAt.After(now.Add(maxAhead)) {
 			return false // placeholder room, too far ahead
 		}
-		if st.StartAt.Before(now.Add(-staleAfter)) {
+		if abandoned(st, now) {
 			return false // abandoned room
 		}
 	}

@@ -1,7 +1,9 @@
 package broadcast
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/Nadif243/fancord-bot/internal/msg"
@@ -15,6 +17,9 @@ type Messenger interface {
 	// Ping sends a message that is allowed to mention one role (and nobody else).
 	Ping(channelID, content, roleID string) error
 }
+
+// ErrGone is what Messenger.Edit returns (wrapped) when the message, or its channel, no longer exists: somebody deleted it.
+var ErrGone = errors.New("the message is gone")
 
 // Announced is what we remember about the message posted for one stream.
 type Announced struct {
@@ -32,6 +37,11 @@ type Memory interface {
 
 	// Put remembers a record. It must be remembered for the rest of this run even when the returned error says it could not be saved to disk.
 	Put(videoID string, a Announced) error
+}
+
+// Lister is a Memory that can say which streams it holds. The Memory of the real bot and of /devstream both can; Waiting needs it.
+type Lister interface {
+	IDs() []string
 }
 
 // Announcer posts ONE message per stream and edits that same message as the stream moves from upcoming to live to ended.
@@ -112,17 +122,68 @@ func (a *Announcer) Update(s Stream) error {
 		if ch == "" {
 			ch = a.channel()
 		}
-		if err := a.m.Edit(ch, prev.MessageID, text); err != nil {
+		id := prev.MessageID
+		if err := a.m.Edit(ch, id, text); err != nil {
+			if !errors.Is(err, ErrGone) {
+				return err
+			}
+			// Somebody deleted the announcement. A stream that is over does not need a new one; a waiting room or a live stream does, in the channel announcements go to now.
+			if s.State != Ended {
+				ch = a.channel()
+				fresh, err := a.m.Send(ch, text)
+				if err != nil {
+					return err // the old record stays, so the next Update tries again
+				}
+				id = fresh
+			}
+		}
+		if err := a.remember(s, ch, id, text); err != nil {
 			return err
 		}
-		if err := a.remember(s, ch, prev.MessageID, text); err != nil {
-			return err
-		}
-		if s.State != prev.State {
+		if s.State != prev.State && s.State != Ended {
 			return a.ping(s, ch)
 		}
 		return nil
 	}
+}
+
+// Waiting lists the streams of her own channel that are announced as waiting rooms and not yet cancelled: the ones a vanished waiting room could be among.
+// Collabs on other channels are left out, because they are not on her channel and so cannot be told apart from vanished ones by looking at it.
+func (a *Announcer) Waiting() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	l, ok := a.mem.(Lister)
+	if !ok {
+		return nil
+	}
+	var out []string
+	for _, id := range l.IDs() {
+		rec, ok := a.mem.Get(id)
+		if ok && rec.State == Upcoming && strings.HasPrefix(rec.Text, msg.StreamUpcomingHead) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// Cancel turns the announcement of a waiting room that has vanished from YouTube into a "cancelled" note. It does nothing for a stream that is not an announced waiting room, and nothing twice. If the room comes back, the next Update edits the message back to the normal waiting-room text.
+func (a *Announcer) Cancel(videoID string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	prev, ok := a.mem.Get(videoID)
+	if !ok || prev.State != Upcoming || !strings.HasPrefix(prev.Text, msg.StreamUpcomingHead) {
+		return nil
+	}
+	text := msg.WaitingCancelled(prev.Text)
+	ch := prev.ChannelID
+	if ch == "" {
+		ch = a.channel()
+	}
+	if err := a.m.Edit(ch, prev.MessageID, text); err != nil && !errors.Is(err, ErrGone) {
+		return err
+	}
+	return a.remember(Stream{VideoID: videoID, State: Upcoming}, ch, prev.MessageID, text)
 }
 
 // ping mentions a role for the state the stream has just entered. It runs after the announcement is saved, so a failed ping is never retried: better one missed ping than the same ping twice.

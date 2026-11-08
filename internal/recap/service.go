@@ -14,7 +14,10 @@ import (
 
 // Source is the stream history. *history.File satisfies it.
 type Source interface {
-	Ended(from, to time.Time) []history.Entry
+	// Week is what a recap for [from, to) counts; carry is explained there.
+	Week(from, to, carry time.Time) []history.Entry
+	// Running is the streams that are live now and started in [since, before).
+	Running(since, before time.Time) []history.Entry
 }
 
 // Sender posts a message. The Discord messenger satisfies it, and it already refuses to ping anybody.
@@ -26,6 +29,9 @@ type Sender interface {
 type Marker interface {
 	LastRecap() time.Time
 	SetLastRecap(time.Time) error
+	// LastRecapPosted is when that recap actually went out (zero if unknown).
+	LastRecapPosted() time.Time
+	SetLastRecapPosted(time.Time) error
 }
 
 // ReminderMarker does the same for the Saturday reminder. *store.File satisfies it.
@@ -38,6 +44,12 @@ const (
 	checkEvery = time.Minute
 	// A recap that is more than this late (the bot was off all Sunday night and the next day) is skipped, not posted as stale news.
 	catchUp = 24 * time.Hour
+
+	// When a stream is still live at the due time, the recap waits for it to end, but never longer than this. After that it goes out without it, and the stream is counted in the next recap.
+	holdMax = 3 * time.Hour
+
+	// Only a stream that started within this long before the due time can hold the recap back: an older "live" entry is a leftover, not a stream.
+	maxRun = 24 * time.Hour
 )
 
 // Service posts the recap every Sunday evening.
@@ -57,6 +69,8 @@ type Service struct {
 	live     liveChannels   // when set, asked each time instead of the fixed IDs above
 	remarker ReminderMarker // remembers the last reminder handled
 	guests   Guests         // collabs on other channels; nil: the recap has none
+
+	waiting bool // already said in the log that the recap waits for a live stream
 }
 
 // New makes a Service. settle should be a little longer than the poll interval: the stream that ended just before the deadline has to be seen as ended by the poller before the recap counts it.
@@ -142,6 +156,13 @@ func (s *Service) tickRecap() {
 	if now.Before(due.Add(s.settle)) {
 		return
 	}
+	if live := s.src.Running(due.Add(-maxRun), due); len(live) > 0 && now.Before(due.Add(holdMax)) {
+		if !s.waiting {
+			s.waiting = true
+			s.log.Info("a stream is still live; the recap waits for it to end", "stream", live[0].VideoID, "at_most_until", due.Add(holdMax))
+		}
+		return
+	}
 	if now.Sub(due) > catchUp {
 		s.log.Warn("the bot was off when the recap was due; skipping it", "due", due)
 		s.remember(due)
@@ -149,17 +170,29 @@ func (s *Service) tickRecap() {
 	}
 
 	texts, note := s.render(due)
-	if err := s.post(s.recapChannel(), texts, func() { s.remember(due) }); err != nil {
+	if err := s.post(s.recapChannel(), texts, func() { s.remember(due); s.rememberPosted(now) }); err != nil {
 		s.log.Error("could not post the weekly recap; will try again", "err", err)
 		return
 	}
+	s.waiting = false
 	s.sendNote(s.opsChannel(), note)
+}
+
+// week is what a recap for [from, to) counts. A stream that started before the window and ended after the previous recap went out was left out of that one, so it is counted here. When the previous recap's posting time is not known, it is taken to be just after its due time.
+func (s *Service) week(from, to time.Time) []history.Entry {
+	carry := from.Add(s.settle)
+	if s.marker.LastRecap().Equal(from) {
+		if posted := s.marker.LastRecapPosted(); posted.After(carry) {
+			carry = posted
+		}
+	}
+	return s.src.Week(from, to, carry)
 }
 
 // render builds the messages for the window ending at due, and the ops note about unknown handles ("" when there is nothing to say).
 func (s *Service) render(due time.Time) (texts []string, note string) {
 	from := due.Add(-window)
-	entries := s.src.Ended(from, due)
+	entries := s.week(from, due)
 	var guests []Guest
 	if s.guests != nil {
 		guests = s.guests.Guests(from, due)
@@ -201,6 +234,12 @@ func (s *Service) remember(due time.Time) {
 	}
 }
 
+func (s *Service) rememberPosted(at time.Time) {
+	if err := s.marker.SetLastRecapPosted(at); err != nil {
+		s.log.Error("could not save when the recap was posted", "err", err)
+	}
+}
+
 // remind posts the Saturday reminder when it is due.
 func (s *Service) remind() {
 	remindID := s.remindChannel()
@@ -229,7 +268,7 @@ func (s *Service) remind() {
 
 // reminder builds the messages for the week that ends with the recap at recapDue: the streams so far whose collabs are not checked. pending is how many that is, total how many streams the week has so far.
 func (s *Service) reminder(recapDue time.Time) (texts []string, pending, total int) {
-	entries := s.src.Ended(recapDue.Add(-window), recapDue)
+	entries := s.week(recapDue.Add(-window), recapDue)
 	var streams []msg.RecapStream
 	for _, e := range entries {
 		if s.partners.Checked(e.VideoID) {

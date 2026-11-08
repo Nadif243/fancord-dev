@@ -17,6 +17,15 @@ func (r *MapMemory) Get(videoID string) (Announced, bool) {
 	return a, ok
 }
 
+// IDs lists the streams it holds.
+func (r *MapMemory) IDs() []string {
+	out := make([]string, 0, len(r.m))
+	for id := range r.m {
+		out = append(out, id)
+	}
+	return out
+}
+
 func (r *MapMemory) Put(videoID string, a Announced) error {
 	r.m[videoID] = a
 	return nil

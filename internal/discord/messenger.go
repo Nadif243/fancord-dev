@@ -3,10 +3,29 @@
 package discord
 
 import (
+	"errors"
+	"fmt"
+
 	"github.com/bwmarrin/discordgo"
 
+	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/outside"
 )
+
+// Discord's error codes for a message or a channel that does not exist.
+const (
+	codeUnknownChannel = 10003
+	codeUnknownMessage = 10008
+)
+
+// isGone reports whether Discord answered that the message (or its channel) does not exist, as opposed to any other failure.
+func isGone(err error) bool {
+	var rest *discordgo.RESTError
+	if !errors.As(err, &rest) || rest.Message == nil {
+		return false
+	}
+	return rest.Message.Code == codeUnknownMessage || rest.Message.Code == codeUnknownChannel
+}
 
 // SessionMessenger lets the other package send and edit messages without knowing about discordgo.
 //
@@ -38,6 +57,14 @@ func (m SessionMessenger) Edit(channelID, messageID, content string) error {
 		Content:         &content,
 		AllowedMentions: nobody(),
 	})
+	return wrapGone(err)
+}
+
+// wrapGone marks a "message does not exist" answer with broadcast.ErrGone and passes every other error (and nil) through unchanged.
+func wrapGone(err error) error {
+	if isGone(err) {
+		return fmt.Errorf("%w: %v", broadcast.ErrGone, err)
+	}
 	return err
 }
 

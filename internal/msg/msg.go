@@ -48,12 +48,29 @@ const (
 )
 
 // StreamUpcoming announces a scheduled stream. The start time is shown twice: as a full date and as "in 2 hours", both rendered by Discord for each viewer.
+
+// StreamUpcomingHead starts every announcement of her own waiting rooms. The bot recognises its own waiting rooms by it (a collab on another channel starts differently).
+const StreamUpcomingHead = "⏰ **Jadwal stream**"
+
 func StreamUpcoming(title, url string, start time.Time) string {
 	title = escape(title)
 	if start.IsZero() {
-		return fmt.Sprintf("⏰ **Jadwal stream**: %s\n%s", title, url)
+		return fmt.Sprintf("%s: %s\n%s", StreamUpcomingHead, title, url)
 	}
-	return fmt.Sprintf("⏰ **Jadwal stream**: %s\nMulai %s (%s)\n%s", title, stampFull(start), stamp(start), url)
+	return fmt.Sprintf("%s: %s\nMulai %s (%s)\n%s", StreamUpcomingHead, title, stampFull(start), stamp(start), url)
+}
+
+// WaitingCancelledHead starts the announcement of a waiting room that is gone.
+const WaitingCancelledHead = "❌ **Jadwal dibatalkan**"
+
+// WaitingCancelled turns the announcement of a waiting room that vanished from YouTube into a struck-through note. It keeps only the first line (the title) and drops the link, because the video no longer exists.
+func WaitingCancelled(old string) string {
+	first, _, _ := strings.Cut(old, "\n")
+	first = strings.TrimSpace(first)
+	if first == "" {
+		return WaitingCancelledHead
+	}
+	return WaitingCancelledHead + "\n~~" + strings.ReplaceAll(first, "~~", "") + "~~"
 }
 
 func StreamLive(title, url string) string {

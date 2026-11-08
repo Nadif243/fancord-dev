@@ -35,6 +35,9 @@ type fileData struct {
 	// It is how a restart knows the recap of this week is already out.
 	LastRecap time.Time `json:"lastRecap"`
 
+	// LastRecapPosted is when that recap was actually posted. A stream that was still running then is missing from it, and is counted in the next.
+	LastRecapPosted time.Time `json:"lastRecapPosted"`
+
 	// LastReminder is the moment of the last Saturday collab reminder that was handled, so a restart does not post it twice.
 	LastReminder time.Time `json:"lastReminder"`
 
@@ -78,6 +81,7 @@ func Open(path string) (*File, error) {
 		f.data.Announced = d.Announced
 	}
 	f.data.LastRecap = d.LastRecap
+	f.data.LastRecapPosted = d.LastRecapPosted
 	f.data.LastReminder = d.LastReminder
 	f.data.LastAlive = d.LastAlive
 	f.data.Relay = d.Relay
@@ -104,6 +108,32 @@ func (f *File) LastRecap() time.Time {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.data.LastRecap
+}
+
+// LastRecapPosted is when the last recap was actually posted; the zero time when that is not known (an older file, or no recap yet).
+func (f *File) LastRecapPosted() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.data.LastRecapPosted
+}
+
+// SetLastRecapPosted remembers when a recap was posted. As with the other markers, the value is kept for this run even if saving fails.
+func (f *File) SetLastRecapPosted(t time.Time) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.data.LastRecapPosted = t.UTC()
+	return f.save()
+}
+
+// IDs lists the videos that have an announcement.
+func (f *File) IDs() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.data.Announced))
+	for id := range f.data.Announced {
+		out = append(out, id)
+	}
+	return out
 }
 
 // LastReminder is the moment of the last collab reminder that was handled; the zero time when none has been.

@@ -117,8 +117,8 @@ func run(log *slog.Logger) error {
 
 	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
 	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory()).
-		WithChannel(channel(settings.Staff)).
-		WithPingFuncs(live.PingUpcoming, live.PingLive)
+		WithChannel(channel(settings.Staff))
+	// No ping roles: /devstream must never tag the real role.
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource

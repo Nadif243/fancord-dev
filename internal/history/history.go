@@ -115,6 +115,55 @@ func (f *File) Ended(from, to time.Time) []Entry {
 	return out
 }
 
+// Week returns the streams a recap for [from, to) counts, oldest first.
+//
+// A stream belongs to the week it STARTED in (a Sunday-afternoon stream that runs past 20:00 is still that week's), and only once it has ended. A stream that started before the window belongs here too when it ended at or after carry: the previous recap went out before it was over, so it is not in it.
+// (A stream whose start we never learnt is placed by its end.)
+func (f *File) Week(from, to, carry time.Time) []Entry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []Entry
+	for _, e := range f.data.Streams {
+		if e.State != "ended" {
+			continue
+		}
+		start, end := e.startedAt(), e.finishedAt()
+		if start.IsZero() {
+			continue
+		}
+		inside := !start.Before(from) && start.Before(to)
+		carried := start.Before(from) && !end.Before(carry)
+		if inside || carried {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		a, b := out[i].startedAt(), out[j].startedAt()
+		if !a.Equal(b) {
+			return a.Before(b)
+		}
+		return out[i].VideoID < out[j].VideoID
+	})
+	return out
+}
+
+// Running returns the streams that are live and started in [since, before).
+// The recap waits for these to end.
+func (f *File) Running(since, before time.Time) []Entry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	var out []Entry
+	for _, e := range f.data.Streams {
+		if e.State == "live" && !e.Start.IsZero() && !e.Start.Before(since) && e.Start.Before(before) {
+			out = append(out, e)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].VideoID < out[j].VideoID })
+	return out
+}
+
 // Get returns one stream by its YouTube video ID.
 func (f *File) Get(videoID string) (Entry, bool) {
 	f.mu.Lock()

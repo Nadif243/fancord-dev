@@ -31,6 +31,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/rodok"
 	"github.com/Nadif243/fancord-bot/internal/settings"
 	"github.com/Nadif243/fancord-bot/internal/store"
+	"github.com/Nadif243/fancord-bot/internal/translate"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
@@ -253,6 +254,13 @@ func run(log *slog.Logger) error {
 		for i, k := range cfg.X.Kinds {
 			kinds[i] = xapi.Kind(k)
 		}
+		// Japanese posts get a translation in their card, when a Gemini key is set.
+		var translator relay.Translator
+		if cfg.Translate.APIKey != "" {
+			translator = translate.NewGemini(cfg.Translate.APIKey, cfg.Translate.Model, cfg.Translate.To)
+		} else {
+			log.Info("tweet translation is off: set GEMINI_API_KEY and GEMINI_MODEL to turn it on")
+		}
 		rel := relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
 			Username:   cfg.X.Username,
 			ChannelID:  cfg.Channels.Tweets,
@@ -263,6 +271,8 @@ func run(log *slog.Logger) error {
 			Every:      cfg.X.PollEvery,
 			Kinds:      kinds,
 			MonthlyCap: cfg.X.MonthlyCap,
+			Cards:      cfg.X.Style == "card",
+			Translator: translator,
 		}, log)
 		if review != nil {
 			// YouTube links in her posts become collab candidates. Links the

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/msg"
+	"github.com/Nadif243/fancord-bot/internal/tweetcard"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
 )
 
@@ -37,6 +38,11 @@ type State struct {
 	ReadsMonth string `json:"readsMonth"` // "2026-11"
 	Reads      int    `json:"reads"`      // billed reads so far this month
 
+	// Her display name and picture, for the card. Looked up with the ID and refreshed now and then (a name or picture can change).
+	ProfileName   string `json:"profileName,omitempty"`
+	ProfileAvatar string `json:"profileAvatar,omitempty"`
+	ProfileAt     int64  `json:"profileAt,omitempty"` // when, in Unix seconds
+
 	Links []Link `json:"links,omitempty"`
 }
 
@@ -51,8 +57,18 @@ type Store interface {
 
 // Source is X. *xapi.Client satisfies it.
 type Source interface {
-	UserID(ctx context.Context, username string) (string, error)
+	User(ctx context.Context, username string) (xapi.User, error)
 	Posts(ctx context.Context, userID, sinceID string) (xapi.Page, error)
+}
+
+// Translator turns Japanese text into the fans' language. *translate.Gemini satisfies it.
+type Translator interface {
+	Translate(ctx context.Context, text string) (string, error)
+}
+
+// CardSender posts a finished card and returns its message ID. The Discord messenger satisfies it. It answers tweetcard.ErrRejected when Discord does not accept the card.
+type CardSender interface {
+	SendCard(channelID string, card tweetcard.Payload) (messageID string, err error)
 }
 
 // Sender posts a message. The Discord messenger satisfies it.
@@ -79,12 +95,28 @@ type Settings struct {
 	Every      time.Duration // how often to check X
 	Kinds      []xapi.Kind   // which post types to relay
 	MonthlyCap int           // billed reads per month; 0 means no cap
+
+	// Cards shows each post as a card; off, each post is a plain link that Discord previews by itself. A post the card cannot show (X did not send what it needs, or Discord refuses the card) goes out as a plain link too.
+	Cards bool
+	// Translator, when set, translates Japanese captions into the card.
+	Translator Translator
 }
 
 const (
 	requestTimeout = 30 * time.Second
 	// A run of failures this long is worth a message in ops.
 	alertAfterFailures = 3
+
+	// How long one translation may take. A slow translation is skipped; the post is never held back for it.
+	translateTimeout = 15 * time.Second
+
+	// Her name and picture are looked up again after this long (a lookup costs the same as two post reads).
+	profileMaxAge = 14 * 24 * time.Hour
+	// After a failed refresh, wait this long before trying again.
+	profileRetry = time.Hour
+
+	// A video is put in the card only if it is estimated to be no bigger than this.
+	maxVideoBytes = 25 << 20
 
 	// X answers 402 when the account has no credits. Asking again every few minutes cannot help, so the relay waits this long between tries.
 	noCreditsStatus = 402
@@ -109,25 +141,63 @@ type Relay struct {
 	capNoted    string    // the month the cap message was sent for
 
 	onLinks func(postID string, videoIDs []string)
-	pinger  Pinger // the sender, when it can also ping; nil otherwise
+	pinger  Pinger     // the sender, when it can also ping; nil otherwise
+	cards   CardSender // the sender, when it can post cards; nil otherwise
+
+	parent          context.Context // the context Check was given, for things that outlive one round
+	profileTryAfter time.Time       // no profile refresh before this moment
+	cardNoted       bool            // the "Discord refused a card" note was sent
 }
 
 func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Relay {
 	r := &Relay{src: src, store: st, send: send, set: set, log: log, now: time.Now}
 	r.pinger, _ = send.(Pinger)
+	r.cards, _ = send.(CardSender)
 	return r
 }
 
-// announce posts one relayed post, pinging the tweet role when one is set.
-func (r *Relay) announce(kind, postURL string) error {
-	channel := r.channel()
-	if r.set.RoleFn != nil && r.pinger != nil {
-		if role := r.set.RoleFn(); role != "" {
-			return r.pinger.Ping(channel, msg.TweetRelayPing(role, kind, postURL), role)
+// announce posts one relayed post: as a card when that is on and the card can be made, otherwise as a plain link.
+func (r *Relay) announce(ctx context.Context, st State, p xapi.Post) error {
+	if r.set.Cards && r.cards != nil {
+		model, ok := r.model(ctx, st, p)
+		if !ok {
+			r.log.Info("tweet relay: not enough of the post to make a card, sending the link", "post", p.ID)
+		} else {
+			model.RoleID = r.role()
+			_, err := r.cards.SendCard(r.channel(), tweetcard.Build(model))
+			switch {
+			case err == nil:
+				return nil
+			case errors.Is(err, tweetcard.ErrRejected):
+				r.log.Warn("tweet relay: Discord refused the card, sending the link", "post", p.ID, "err", err)
+				if !r.cardNoted {
+					r.cardNoted = true
+					r.ops(msg.RelayCardRefused(err.Error()))
+				}
+			default:
+				return err // not marked handled: tried again next round
+			}
 		}
+	}
+	return r.announceLink(string(p.Kind), r.postURL(p.ID))
+}
+
+// announceLink posts the plain link, pinging the tweet role when one is set.
+func (r *Relay) announceLink(kind, postURL string) error {
+	channel := r.channel()
+	if role := r.role(); role != "" && r.pinger != nil {
+		return r.pinger.Ping(channel, msg.TweetRelayPing(role, kind, postURL), role)
 	}
 	_, err := r.send.Send(channel, msg.TweetRelay(kind, postURL))
 	return err
+}
+
+// role is the role to ping with each post, or "".
+func (r *Relay) role() string {
+	if r.set.RoleFn == nil {
+		return ""
+	}
+	return r.set.RoleFn()
 }
 
 // OnLinks sets a function that is called with the YouTube videos found in a post, after the post was handled and saved. Set it before Run.
@@ -155,6 +225,7 @@ func (r *Relay) Check(parent context.Context) {
 	if r.now().Before(r.pausedUntil) {
 		return // waiting for credits to be added
 	}
+	r.parent = parent
 	ctx, cancel := context.WithTimeout(parent, requestTimeout)
 	defer cancel()
 
@@ -201,15 +272,21 @@ func (r *Relay) round(ctx context.Context) error {
 	if st.Username != r.set.Username {
 		st = State{Username: r.set.Username, ReadsMonth: month, Reads: st.Reads, Links: st.Links}
 	}
-	if st.UserID == "" {
-		id, err := r.src.UserID(ctx, r.set.Username)
-		if err != nil {
+	if st.UserID == "" || r.profileDue(st) {
+		u, err := r.src.User(ctx, r.set.Username)
+		switch {
+		case err == nil:
+			st.Reads += 2 // a user read costs $0.01, twice a post read
+			st.UserID, st.ProfileName, st.ProfileAvatar, st.ProfileAt = u.ID, u.Name, u.AvatarURL, r.now().Unix()
+			if err := r.save(st); err != nil {
+				return err
+			}
+		case st.UserID == "":
 			return err // a refused call is not billed, so it is not counted
-		}
-		st.Reads += 2 // a user read costs $0.01, twice a post read
-		st.UserID = id
-		if err := r.save(st); err != nil {
-			return err
+		default:
+			// The old name and picture do. Do not ask again every round.
+			r.profileTryAfter = r.now().Add(profileRetry)
+			r.log.Warn("tweet relay: could not refresh her profile; keeping the old one", "err", err)
 		}
 	}
 
@@ -239,7 +316,7 @@ func (r *Relay) round(ctx context.Context) error {
 			continue // the API should not repeat, but a repeat must not be posted twice
 		}
 		if slices.Contains(r.set.Kinds, p.Kind) {
-			if err := r.announce(string(p.Kind), r.postURL(p.ID)); err != nil {
+			if err := r.announce(ctx, st, p); err != nil {
 				return fmt.Errorf("post %s to Discord: %w", p.ID, err) // not marked handled: tried again next round
 			}
 		}
@@ -262,6 +339,15 @@ func (r *Relay) afterReads(st State) error {
 		r.ops(msg.RelayBudgetWarning(st.Reads, cap))
 	}
 	return nil
+}
+
+// profileDue reports whether her name and picture should be looked up again.
+// Only cards use them, so with cards off nothing is looked up.
+func (r *Relay) profileDue(st State) bool {
+	if !r.set.Cards || r.now().Before(r.profileTryAfter) {
+		return false
+	}
+	return st.ProfileAt == 0 || r.now().Sub(time.Unix(st.ProfileAt, 0)) > profileMaxAge
 }
 
 // hasStatus reports whether err is X answering with this HTTP status.

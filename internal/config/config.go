@@ -34,6 +34,7 @@ const (
 	defaultXPollSeconds     = 300
 	minXPollSeconds         = 60
 	defaultXMonthlyCap      = 250
+	defaultTranslateTo      = "Indonesian"
 	minXMonthlyCap          = 10
 	defaultPollSeconds      = 120
 	minPollSeconds          = 30
@@ -67,6 +68,16 @@ type X struct {
 
 	// FanLookupCap is how many X posts per month may be read for links fans send (one billed read each). 0 turns reading them off.
 	FanLookupCap int
+
+	// Style is how a post is shown: "card" (a card with the text, pictures, numbers and translation) or "link" (a plain link that Discord previews).
+	Style string
+}
+
+// Translate holds the settings for translating Japanese posts. Without a key nothing is translated.
+type Translate struct {
+	APIKey string // secret
+	Model  string // the Gemini model to ask
+	To     string // the language to translate into, named in English
 }
 
 // Review holds the settings for collabs on other channels: candidates are posted in the approval channel and confirmed with buttons.
@@ -110,6 +121,7 @@ type Config struct {
 	Pings          Pings
 	YouTube        YouTube
 	X              X
+	Translate      Translate
 	Review         Review
 	HeartbeatEvery time.Duration
 
@@ -186,6 +198,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
 
 	c.X = loadX(get, &problems)
+	c.Translate = loadTranslate(get, &problems)
 
 	c.PartnersFile = get("PARTNERS_FILE")
 	if c.PartnersFile == "" {
@@ -322,6 +335,15 @@ func loadX(get func(string) string, problems *[]string) X {
 		}
 	}
 
+	x.Style = "card"
+	if v := strings.ToLower(get("TWEET_STYLE")); v != "" {
+		if v != "card" && v != "link" {
+			*problems = append(*problems, "TWEET_STYLE must be card or link, got "+quote(v))
+		} else {
+			x.Style = v
+		}
+	}
+
 	x.Kinds = RelayKinds
 	if v := get("X_RELAY_TYPES"); v != "" {
 		x.Kinds = nil
@@ -340,6 +362,25 @@ func loadX(get func(string) string, problems *[]string) X {
 		}
 	}
 	return x
+}
+
+// A language named in English: letters, spaces and hyphens ("Indonesian", "Brazilian Portuguese"). It goes into the translator's instructions, so it is kept to plain words.
+var languageName = regexp.MustCompile(`^[A-Za-z][A-Za-z -]{1,39}$`)
+
+// loadTranslate reads the translation settings. The key is never repeated in an error message.
+func loadTranslate(get func(string) string, problems *[]string) Translate {
+	t := Translate{APIKey: get("GEMINI_API_KEY"), Model: get("GEMINI_MODEL"), To: defaultTranslateTo}
+	if v := get("TRANSLATE_TO"); v != "" {
+		if !languageName.MatchString(v) {
+			*problems = append(*problems, "TRANSLATE_TO must be a language named in English, such as Indonesian or English, got "+quote(v))
+		} else {
+			t.To = v
+		}
+	}
+	if t.APIKey != "" && t.Model == "" {
+		*problems = append(*problems, "GEMINI_MODEL is empty: with GEMINI_API_KEY set, name the model to use (the same model name Renbun uses is fine)")
+	}
+	return t
 }
 
 func quote(s string) string {

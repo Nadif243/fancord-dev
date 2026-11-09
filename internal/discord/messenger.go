@@ -3,13 +3,16 @@
 package discord
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/bwmarrin/discordgo"
 
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/outside"
+	"github.com/Nadif243/fancord-bot/internal/tweetcard"
 )
 
 // Discord's error codes for a message or a channel that does not exist.
@@ -103,4 +106,23 @@ func (m SessionMessenger) Ping(channelID, content, roleID string) error {
 		},
 	})
 	return err
+}
+
+// SendCard posts a tweet card: a message built from Discord's newer display components, which discordgo's ordinary message type does not carry. The body is already finished JSON-ready data, so it goes out through the library's plain request call (which still handles rate limits).
+
+// Discord answering 400 means it did not accept the card as built; that is reported as tweetcard.ErrRejected so the caller can send a plain link instead. Any other failure is returned as it is.
+func (m SessionMessenger) SendCard(channelID string, card tweetcard.Payload) (string, error) {
+	body, err := m.S.Request(http.MethodPost, discordgo.EndpointChannelMessages(channelID), card)
+	if err != nil {
+		var rest *discordgo.RESTError
+		if errors.As(err, &rest) && rest.Response != nil && rest.Response.StatusCode == http.StatusBadRequest {
+			return "", fmt.Errorf("%w: %v", tweetcard.ErrRejected, err)
+		}
+		return "", err
+	}
+	var sent struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(body, &sent) // the ID is only for the caller's records
+	return sent.ID, nil
 }

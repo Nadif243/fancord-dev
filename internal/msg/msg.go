@@ -642,6 +642,80 @@ func TweetRelay(kind, url string) string {
 	return label + "\n" + url
 }
 
+// ---- Tweet cards ---------------------------------------------------------
+//
+// A relayed post can be shown as a card (see package tweetcard). Everything the card says in words is here.
+
+// TweetLead is the line above a card, after the ping. kind is "post", "reply", "quote" or "repost". target is the handle (without @) the post is about: who was answered, quoted or reposted; "" when not known. self is true for a reply to her own post (a thread).
+func TweetLead(kind, target string, self bool) string {
+	who := ""
+	if target != "" {
+		who = " @" + escape(target)
+	}
+	switch kind {
+	case "reply":
+		if self {
+			return "💬 **Yuura membalas tweet-nya sendiri**"
+		}
+		return "💬 **Yuura membalas**" + who
+	case "quote":
+		return "💭 **Yuura mengutip**" + who
+	case "repost":
+		return "🔁 **Yuura me-repost**" + who
+	}
+	return "🐦 **Tweet baru dari Yuura**"
+}
+
+// TweetHeader is the first line of a card: the display name in bold and the handle, both a link to the post when a link is given.
+func TweetHeader(name, handle, link string) string {
+	text := "@" + escape(handle)
+	if name = strings.TrimSpace(name); name != "" {
+		text = "**" + escape(shorten(name, 60)) + "** (" + text + ")"
+	}
+	if link != "" {
+		return "[" + text + "](" + link + ")"
+	}
+	return text
+}
+
+// TweetQuoteHead introduces a quoted post inside a card.
+func TweetQuoteHead(name, handle, link string) string {
+	return "Mengutip " + TweetHeader(name, handle, link)
+}
+
+// TweetFootnote is the small line at the bottom of a card. The time is drawn by
+// Discord in each reader's own time zone. replyToID, when set, adds a link to the post that was answered; cut says that long text was shortened.
+func TweetFootnote(posted time.Time, postURL, replyToID string, cut bool) string {
+	parts := []string{"X"}
+	if !posted.IsZero() {
+		parts = append(parts, fmt.Sprintf("Diposting <t:%d:f>", posted.Unix()))
+	}
+	parts = append(parts, "[Buka di X]("+postURL+")")
+	if replyToID != "" {
+		parts = append(parts, "[Tweet yang dibalas](https://x.com/i/status/"+replyToID+")")
+	}
+	if cut {
+		parts = append(parts, "teks dipotong")
+	}
+	return "-# " + strings.Join(parts, " · ")
+}
+
+const (
+	// TweetTranslationHead heads the machine translation inside a card.
+	TweetTranslationHead = "🌐 **Terjemahan** (otomatis)"
+
+	// TweetVideoStill is shown under a picture that stands in for a video the card could not carry.
+	TweetVideoStill = "-# ▶ Video ini bisa ditonton di X"
+
+	// TweetMediaMissing is shown when X named media it did not describe.
+	TweetMediaMissing = "-# 📎 Ada media yang tidak bisa ditampilkan di sini, lihat di X"
+)
+
+// RelayCardRefused is the ops note (English) when Discord refuses a tweet card.
+func RelayCardRefused(err string) string {
+	return "🧩 **Tweet relay** · Discord refused a tweet card, so that tweet went out as a plain link instead. Cards keep being tried for the next tweets. Set TWEET_STYLE=link in .env to stop trying.\nDiscord said: " + escape(shorten(err, 300))
+}
+
 // RelayFailing is the ops note (English) when the tweet relay keeps failing.
 func RelayFailing(failures int, err string) string {
 	return fmt.Sprintf("⚠️ **Tweet relay** · %d checks in a row have failed, so new tweets are not being relayed. It keeps trying; this note comes once.\nLast error: %s", failures, escape(shorten(err, 300)))

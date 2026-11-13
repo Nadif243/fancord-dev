@@ -32,6 +32,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/settings"
 	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/translate"
+	"github.com/Nadif243/fancord-bot/internal/which"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
 	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
@@ -135,6 +136,7 @@ func run(log *slog.Logger) error {
 	var recapService *recap.Service
 	var collab discord.CollabTagger // stays a nil interface when the recap is off
 	var review *outside.Service     // collabs on other channels; nil when YouTube is off
+	var asks *which.Service         // "who is meant?" questions; nil when YouTube is off
 	if pollerOn {
 		book, err := loadPartners(cfg.PartnersFile, log)
 		if err != nil {
@@ -154,6 +156,13 @@ func run(log *slog.Logger) error {
 			WithReminder(cfg.Channels.Test, memory).
 			WithLiveChannels(channel(settings.Recap), channel(settings.Ops), channel(settings.Reminder))
 		collab = who
+
+		questions, err := which.OpenFile(cfg.WhichFile)
+		if err != nil {
+			return err
+		}
+		log.Info("nickname questions file ready", "path", cfg.WhichFile)
+		asks = which.New(questions, streams, who, tags, messenger, which.Settings{ChannelFn: channel(settings.Review)}, log)
 
 		decisions, err := outside.OpenFile(cfg.Review.File)
 		if err != nil {
@@ -177,6 +186,10 @@ func run(log *slog.Logger) error {
 	if review != nil {
 		reviewer = review
 	}
+	var chooser discord.NicknameAsker // stays a nil interface when there are no questions
+	if asks != nil {
+		chooser = asks
+	}
 	var preview discord.RecapPreviewer          // stays a nil interface when the recap is off
 	var remindPreview discord.ReminderPreviewer // same for the reminder
 	if recapService != nil {
@@ -194,6 +207,7 @@ func run(log *slog.Logger) error {
 		Reminder:         remindPreview,
 		Collab:           collab,
 		Outside:          reviewer,
+		Which:            chooser,
 		Rodok:            rodok.New(rodokCounts),
 		DevChannel:       channel(settings.Staff),
 		LinkChannel:      channel(settings.Fans),
@@ -297,6 +311,7 @@ func run(log *slog.Logger) error {
 			OnFirstCheck(back.FirstCheckDone).Run)
 		start(recapService.Run)
 		start(review.Run)
+		start(asks.Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
 	}

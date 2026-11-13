@@ -8,11 +8,13 @@
 //		@yuurayozakura,ignore,,
 //
 //	  - name: what the recap shows. It is also matched in titles, with or without a leading "@".
-//	  - kind: "partner" (the default) is counted and shown in the recap; "group" is a team: naming it in a title (or typing it in /collab) means all of its members; "ignore" is known but never shown (her own handle, say), so it is not reported as an unknown handle either.
+//	  - kind: "partner" (the default) is counted and shown in the recap; "group" is a team: naming it in a title (or typing it in /collab) means all of its members; "duo" is a team that is only ever named when the title says its name, and the recap writes it alone, without "bareng" (a two-person team such as YuuGuRe); "ignore" is known but never shown (her own handle, say), so it is not reported as an unknown handle either.
 //	  - also_matches: other spellings, separated by "|".
-//	  - members: for a group only, the partners in it, separated by "|".
+//	  - members: for a group or duo only, the partners in it, separated by "|".
 //
 // A spelling matches only as a whole word, ignoring capitals: "dina" matches in "Main bareng Dina!" and in "@Dina", but not inside "@DinaMostarterra" (that one is matched by its own name) or in "dinamit".
+//
+// Two partners may share a spelling (a nickname that is both people's). On its own that spelling names nobody: the title does not say which one, so Match leaves both out and Ambiguities reports it, for a person to decide. If the title also names one of them another way ("@mishikaaya"), there is nothing to ask.
 package partners
 
 import (
@@ -23,6 +25,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"unicode"
@@ -35,19 +38,25 @@ const (
 	kindPartner kind = iota + 1
 	kindIgnore
 	kindGroup
+	kindDuo
 )
 
 type entry struct {
 	name    string
 	kind    kind
 	tokens  []string // lower-case spellings, whole-word matched
-	members []string // groups only: the display names of the partners in it
+	solo    []string // the spellings that name this entry by themselves: tokens, minus the ones a partner shares with another partner
+	members []string // groups and duos only: the display names of the partners in it
 }
+
+// isTeam says whether the entry stands for several partners.
+func (e entry) isTeam() bool { return e.kind == kindGroup || e.kind == kindDuo }
 
 // Book is the loaded list. A nil *Book is a valid, empty list: it matches nothing, so the recap simply has no collab line.
 type Book struct {
 	entries []entry
-	known   map[string]bool // every spelling of every entry, for Unknown
+	known   map[string]bool     // every spelling of every entry, for Unknown
+	shared  map[string][]string // a spelling that two or more partners have -> their display names, in file order
 }
 
 // Len is the number of partners that are counted in the recap.
@@ -167,8 +176,10 @@ func Parse(raw []byte) (*Book, error) {
 			e.kind = kindIgnore
 		case "group":
 			e.kind = kindGroup
+		case "duo":
+			e.kind = kindDuo
 		default:
-			problems = append(problems, fmt.Sprintf("line %d (%s): kind must be partner, group or ignore, got %q", line, name, cell(rec, "kind")))
+			problems = append(problems, fmt.Sprintf("line %d (%s): kind must be partner, group, duo or ignore, got %q", line, name, cell(rec, "kind")))
 			continue
 		}
 		if first, dup := seen[strings.ToLower(name)]; dup {
@@ -178,17 +189,17 @@ func Parse(raw []byte) (*Book, error) {
 		seen[strings.ToLower(name)] = line
 
 		members := cell(rec, "members")
-		if e.kind != kindGroup && members != "" {
-			problems = append(problems, fmt.Sprintf("line %d (%s): only a group can have members", line, name))
+		if !e.isTeam() && members != "" {
+			problems = append(problems, fmt.Sprintf("line %d (%s): only a group or a duo can have members", line, name))
 		}
-		if e.kind == kindGroup {
+		if e.isTeam() {
 			for _, m := range strings.Split(members, "|") {
 				if m = strings.TrimSpace(m); m != "" {
 					e.members = append(e.members, m)
 				}
 			}
 			if len(e.members) == 0 {
-				problems = append(problems, fmt.Sprintf("line %d (%s): a group needs members", line, name))
+				problems = append(problems, fmt.Sprintf("line %d (%s): a group or duo needs members", line, name))
 			}
 			memberLine[name] = line
 		}
@@ -222,7 +233,7 @@ func Parse(raw []byte) (*Book, error) {
 	}
 	for i := range b.entries {
 		g := &b.entries[i]
-		if g.kind != kindGroup {
+		if !g.isTeam() {
 			continue
 		}
 		for j, m := range g.members {
@@ -241,7 +252,37 @@ func Parse(raw []byte) (*Book, error) {
 	if len(problems) > 0 {
 		return nil, joinProblems(problems)
 	}
+	b.findShared()
 	return b, nil
+}
+
+// findShared notes the spellings that belong to two or more partners, and gives every entry its solo spellings.
+func (b *Book) findShared() {
+	owners := map[string][]string{}
+	for _, e := range b.entries {
+		if e.kind != kindPartner {
+			continue
+		}
+		for _, t := range e.tokens {
+			owners[t] = append(owners[t], e.name)
+		}
+	}
+	b.shared = map[string][]string{}
+	for t, who := range owners {
+		if len(who) > 1 {
+			b.shared[t] = who
+		}
+	}
+	for i := range b.entries {
+		e := &b.entries[i]
+		e.solo = nil
+		for _, t := range e.tokens {
+			if e.kind == kindPartner && b.shared[t] != nil {
+				continue
+			}
+			e.solo = append(e.solo, t)
+		}
+	}
 }
 
 // delimiter picks the separator from the first line. Excel with Indonesian (and many European) regional settings saves CSV files with ";" instead of ",".
@@ -253,7 +294,7 @@ func delimiter(raw []byte) rune {
 	return ','
 }
 
-// Match returns the display names of the partners named in the title, in the order of the file, each once. A group named in the title counts as all of its members; a person who was absent is taken out afterwards by hand.
+// Match returns the display names of the partners named in the title, in the order of the file, each once. A group named in the title counts as all of its members; a person who was absent is taken out afterwards by hand. A spelling that two partners share names nobody by itself (see Ambiguities).
 func (b *Book) Match(title string) []string {
 	if b == nil {
 		return nil
@@ -261,10 +302,10 @@ func (b *Book) Match(title string) []string {
 	text := normalise(title)
 	named := map[string]bool{}
 	for _, e := range b.entries {
-		if e.kind == kindIgnore || !anyWord(text, e.tokens) {
+		if e.kind == kindIgnore || !anyWord(text, e.solo) {
 			continue
 		}
-		if e.kind == kindGroup {
+		if e.isTeam() {
 			for _, m := range e.members {
 				named[m] = true
 			}
@@ -273,6 +314,47 @@ func (b *Book) Match(title string) []string {
 		}
 	}
 	return b.inFileOrder(named)
+}
+
+// Ambiguity is a spelling in a title that belongs to more than one partner, so the title does not say who was there.
+type Ambiguity struct {
+	Word       string   // the spelling, lower-case
+	Candidates []string // the partners who have it, in file order
+}
+
+// Ambiguities lists the shared spellings in the title that nothing else in the title settles: if one of the candidates is also named another way (by her handle, say), the shared word is taken to mean that one and is not listed. Sorted by spelling.
+func (b *Book) Ambiguities(title string) []Ambiguity {
+	if b == nil || len(b.shared) == 0 {
+		return nil
+	}
+	text := normalise(title)
+	named := map[string]bool{}
+	for _, n := range b.Match(title) {
+		named[n] = true
+	}
+	words := make([]string, 0, len(b.shared))
+	for w := range b.shared {
+		words = append(words, w)
+	}
+	sort.Strings(words)
+	var out []Ambiguity
+	for _, w := range words {
+		if !hasWord(text, w) {
+			continue
+		}
+		who := b.shared[w]
+		settled := false
+		for _, n := range who {
+			if named[n] {
+				settled = true
+				break
+			}
+		}
+		if !settled {
+			out = append(out, Ambiguity{Word: w, Candidates: append([]string(nil), who...)})
+		}
+	}
+	return out
 }
 
 // Resolve reads names typed by a person, such as "dina, kocak": partners (by name, handle or nickname) and groups, separated by commas. A group stands for all its members. It returns the partners in file order, and the terms it did not recognise.
@@ -292,7 +374,7 @@ func (b *Book) Resolve(text string) (names, unknown []string) {
 				continue
 			}
 			found = true
-			if e.kind == kindGroup {
+			if e.isTeam() {
 				for _, m := range e.members {
 					named[m] = true
 				}
@@ -354,6 +436,27 @@ func (b *Book) Summary(names []string) []string {
 	return out
 }
 
+// SummaryFor is Summary for one stream, whose title is known: a duo is named when the title says its name and all of its members are in the list. Those members are then not listed on their own, and the duo comes back separately (in file order), so the recap can write it without "bareng".
+func (b *Book) SummaryFor(title string, names []string) (with, duos []string) {
+	with = b.Summary(names)
+	if b == nil {
+		return with, nil
+	}
+	present := map[string]bool{}
+	for _, n := range names {
+		present[n] = true
+	}
+	text := normalise(title)
+	for _, e := range b.entries {
+		if e.kind != kindDuo || !anyWord(text, e.tokens) || !allIn(e.members, present) {
+			continue
+		}
+		duos = append(duos, e.name)
+		with = slices.DeleteFunc(with, func(n string) bool { return slices.Contains(e.members, n) })
+	}
+	return with, duos
+}
+
 // allIn reports whether every name is in the set (an empty list is not "all").
 func allIn(names []string, set map[string]bool) bool {
 	for _, n := range names {
@@ -381,7 +484,7 @@ func (b *Book) Suggest(typed string, n int) []Suggestion {
 		if e.kind == kindIgnore || !(q == "" || anySubstring(e.tokens, q)) {
 			continue
 		}
-		if e.kind == kindGroup {
+		if e.isTeam() {
 			groups = append(groups, Suggestion{Name: e.name, Members: len(e.members)})
 		} else {
 			people = append(people, Suggestion{Name: e.name})

@@ -17,6 +17,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/outside"
 	"github.com/Nadif243/fancord-bot/internal/partners"
 	"github.com/Nadif243/fancord-bot/internal/rodok"
+	"github.com/Nadif243/fancord-bot/internal/which"
 )
 
 // handler runs one slash command. Returning an error only logs it; the user already got whatever the handler managed to reply.
@@ -45,6 +46,12 @@ type CollabTagger interface {
 	Change(videoID, add, remove string) (collabs.Outcome, error)
 }
 
+// NicknameAsker takes the answers to "who is meant?" questions.
+// *which.Service satisfies it.
+type NicknameAsker interface {
+	Answer(key, choice, by string) (which.Result, error)
+}
+
 // CollabReviewer takes the links people send and the reviewers' decisions.
 // *outside.Service satisfies it.
 type CollabReviewer interface {
@@ -69,6 +76,7 @@ type Deps struct {
 	Reminder         ReminderPreviewer    // nil when the reminder is off
 	Collab           CollabTagger         // nil when the recap is off
 	Outside          CollabReviewer       // nil when collab review is off
+	Which            NicknameAsker        // nil when there are no nickname questions
 	Rodok            Rodoker              // nil when /rodok is not set up
 
 	// LinkChannelID is the fan channel where links are read from messages.
@@ -375,6 +383,10 @@ func canReview(m *discordgo.Member, roleID string) bool {
 // onComponent handles a press on a button under a review message.
 func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	customID := i.MessageComponentData().CustomID
+	if key, choice, ok := which.ParseCustomID(customID); ok {
+		r.onWhich(s, i, key, choice)
+		return
+	}
 	action, videoID, ok := outside.ParseCustomID(customID)
 	if !ok {
 		return // not one of ours
@@ -416,6 +428,44 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 	})
 	if err != nil {
 		log.Error("could not update the review message", "err", err)
+	}
+}
+
+// onWhich handles a press on a button under a "who is meant?" question. The people who may press are the same as for the review buttons.
+func (r *Router) onWhich(s *discordgo.Session, i *discordgo.InteractionCreate, key, choice string) {
+	log := r.log.With("button", "which", "question", key)
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Error("button panicked", "panic", rec)
+			_ = replyPrivate(s, i, msg.CommandFailed)
+		}
+	}()
+	switch {
+	case r.deps.Which == nil:
+		_ = replyPrivate(s, i, msg.CollabReviewOff)
+		return
+	case !r.mayReview(i.Member):
+		_ = replyPrivate(s, i, msg.CollabReviewDenied)
+		return
+	}
+	res, err := r.deps.Which.Answer(key, choice, userName(i))
+	if errors.Is(err, which.ErrUnknown) || errors.Is(err, which.ErrBadChoice) {
+		_ = replyPrivate(s, i, msg.CollabReviewOff)
+		return
+	}
+	if err != nil {
+		log.Error("could not save the answer (it holds until restart)", "err", err)
+	}
+	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+		Type: discordgo.InteractionResponseUpdateMessage,
+		Data: &discordgo.InteractionResponseData{
+			Content:         res.Text,
+			Components:      []discordgo.MessageComponent{},
+			AllowedMentions: nobody(),
+		},
+	})
+	if err != nil {
+		log.Error("could not update the question", "err", err)
 	}
 }
 

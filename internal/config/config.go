@@ -29,6 +29,7 @@ const (
 	defaultSettingsFile     = "data/settings.json"
 	defaultXFanLookupCap    = 20
 	defaultOutsideFile      = "data/outside.json"
+	defaultWhichFile        = "data/which.json"
 	defaultMentionWords     = "yuura,yozakura"
 	defaultXUsername        = "YozakuraYuura"
 	defaultXPollSeconds     = 300
@@ -111,6 +112,7 @@ type Config struct {
 	DataFile       string // where the bot remembers what it announced
 	HistoryFile    string // where it records every stream it sees, for the recap
 	PartnersFile   string // the collab partner list (CSV) the recap reads
+	WhichFile      string // the "who is meant?" questions about shared nicknames
 	CollabFile     string // who people tagged as being in a stream, by hand
 	RodokFile      string // how many times each person has used /rodok on each other person
 	SettingsFile   string // what /setup saved; it beats .env for channels and roles
@@ -200,6 +202,10 @@ func Load(getenv func(string) string) (Config, error) {
 	c.X = loadX(get, &problems)
 	c.Translate = loadTranslate(get, &problems)
 
+	c.WhichFile = get("WHICH_FILE")
+	if c.WhichFile == "" {
+		c.WhichFile = defaultWhichFile
+	}
 	c.PartnersFile = get("PARTNERS_FILE")
 	if c.PartnersFile == "" {
 		c.PartnersFile = defaultPartnersFile

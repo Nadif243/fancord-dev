@@ -107,6 +107,14 @@ func (s *Service) Checked(videoID string) bool { return s.tags.Checked(videoID) 
 // Summary shortens a list of partners for reading: a full team is named once.
 func (s *Service) Summary(names []string) []string { return s.book.Summary(names) }
 
+// SummaryFor is Summary for one stream: a duo whose name is in the title is returned apart (see partners.Book.SummaryFor).
+func (s *Service) SummaryFor(title string, names []string) (with, duos []string) {
+	return s.book.SummaryFor(title, names)
+}
+
+// Ambiguities lists the nicknames in a title that two partners share.
+func (s *Service) Ambiguities(title string) []partners.Ambiguity { return s.book.Ambiguities(title) }
+
 // Suggest lists partners and teams matching what a person has typed so far, for autocomplete.
 func (s *Service) Suggest(typed string, n int) []partners.Suggestion {
 	return s.book.Suggest(typed, n)

@@ -192,6 +192,7 @@ type RecapStream struct {
 	Start    time.Time
 	Duration time.Duration // 0 when unknown
 	With     []string      // who was in it, already shortened (a full team is one name)
+	Duos     []string      // a duo the title itself names (YuuGuRe): written alone, without "bareng"
 	Channel  string        // set for a collab on another channel: whose channel it was
 }
 
@@ -349,6 +350,9 @@ func recapLine(st RecapStream) string {
 	}
 	if st.Channel != "" {
 		line += " · di " + escape(shorten(st.Channel, 40))
+	}
+	if len(st.Duos) > 0 {
+		line += " · " + escapeAll(st.Duos)
 	}
 	if len(st.With) > 0 {
 		line += " · bareng " + escapeAll(st.With)
@@ -596,7 +600,36 @@ func CollabDecided(v CollabCandidateView, decision, by string) string {
 	return CollabCandidate(v) + "\n" + verdict
 }
 
-// ---- /collablink (Indonesian, for fans) -----------------------------------
+// ---- which partner is meant (English, for the review channel) -------------
+
+// WhichView is one nickname question as a person sees it: a nickname in a stream's title that two or more partners share.
+type WhichView struct {
+	Word       string
+	Title      string
+	VideoID    string
+	Start      time.Time
+	Candidates []string
+}
+
+// WhichQuestion asks who the nickname means. The link is in <> so Discord shows no preview of the video.
+func WhichQuestion(v WhichView) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "❓ **Who is \"%s\"?**\n", escape(v.Word))
+	fmt.Fprintf(&b, "**%s** · %s\n<https://www.youtube.com/watch?v=%s>\n", dateLabel(v.Start), escape(shorten(v.Title, 100)), v.VideoID)
+	fmt.Fprintf(&b, "The title says \"%s\", which %d partners use: %s. Press who was in the stream. Until someone does, the recap leaves them out.", escape(v.Word), len(v.Candidates), escapeAll(v.Candidates))
+	return b.String()
+}
+
+// WhichDecided is the question after an answer, with the answer added at the end (the buttons are removed by the caller). chosen is empty for "neither".
+func WhichDecided(v WhichView, chosen []string, by string) string {
+	verdict := "🚫 **Nobody tagged**, by " + escape(by)
+	if len(chosen) > 0 {
+		verdict = "✅ **Tagged** " + escapeAll(chosen) + ", by " + escape(by)
+	}
+	return WhichQuestion(v) + "\n" + verdict
+}
+
+// ---- /collablink (Indonesian, for member) -----------------------------------
 
 const (
 	CollabLinkDescription       = "Kirim link YouTube kolaborasi Yuura di channel lain untuk dicek"

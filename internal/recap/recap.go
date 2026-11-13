@@ -60,6 +60,8 @@ type Matcher interface {
 	Partners(videoID, title string) []string
 	// Summary shortens such a list for reading: a full team becomes its name.
 	Summary(names []string) []string
+	// SummaryFor is Summary for one stream, whose title is known: a duo named in the title comes back apart, because it is written without "bareng".
+	SummaryFor(title string, names []string) (with, duos []string)
 	// Unknown returns @handles in the title that the partner list does not know.
 	Unknown(title string) []string
 	// Checked says whether a person has confirmed who was in the stream.
@@ -144,7 +146,7 @@ func streamOf(e history.Entry, partners Matcher) (msg.RecapStream, []string) {
 	var who []string
 	if partners != nil {
 		who = partners.Partners(e.VideoID, e.Title)
-		st.With = partners.Summary(who)
+		st.With, st.Duos = partners.SummaryFor(e.Title, who)
 	}
 	return st, who
 }

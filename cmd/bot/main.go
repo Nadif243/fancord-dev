@@ -29,6 +29,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/recap"
 	"github.com/Nadif243/fancord-bot/internal/relay"
 	"github.com/Nadif243/fancord-bot/internal/rodok"
+	"github.com/Nadif243/fancord-bot/internal/rolepanel"
 	"github.com/Nadif243/fancord-bot/internal/settings"
 	"github.com/Nadif243/fancord-bot/internal/store"
 	"github.com/Nadif243/fancord-bot/internal/translate"
@@ -190,6 +191,15 @@ func run(log *slog.Logger) error {
 	if asks != nil {
 		chooser = asks
 	}
+	// The role panel needs no YouTube; it only reads and writes its own file.
+	panelFile, err := rolepanel.OpenStore(cfg.RolesFile, rolepanel.Seed())
+	if err != nil {
+		return err
+	}
+	log.Info("role panel file ready", "path", cfg.RolesFile)
+	panel := discord.PanelAdapter{S: s}
+	roles := rolepanel.New(panelFile, panel, panel)
+
 	var preview discord.RecapPreviewer          // stays a nil interface when the recap is off
 	var remindPreview discord.ReminderPreviewer // same for the reminder
 	if recapService != nil {
@@ -209,6 +219,7 @@ func run(log *slog.Logger) error {
 		Outside:          reviewer,
 		Which:            chooser,
 		Rodok:            rodok.New(rodokCounts),
+		Roles:            roles,
 		DevChannel:       channel(settings.Staff),
 		LinkChannel:      channel(settings.Fans),
 		ReviewRole:       channel(settings.Reviewer),

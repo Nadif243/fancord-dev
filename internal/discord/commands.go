@@ -17,6 +17,7 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/outside"
 	"github.com/Nadif243/fancord-bot/internal/partners"
 	"github.com/Nadif243/fancord-bot/internal/rodok"
+	"github.com/Nadif243/fancord-bot/internal/rolepanel"
 	"github.com/Nadif243/fancord-bot/internal/which"
 )
 
@@ -78,6 +79,7 @@ type Deps struct {
 	Outside          CollabReviewer       // nil when collab review is off
 	Which            NicknameAsker        // nil when there are no nickname questions
 	Rodok            Rodoker              // nil when /rodok is not set up
+	Roles            RolePanel            // nil when the role panel is off
 
 	// LinkChannelID is the fan channel where links are read from messages.
 	LinkChannelID string
@@ -246,6 +248,11 @@ func NewRouter(log *slog.Logger, deps Deps) *Router {
 	// /setup is for people with Manage Server; it changes channels and roles while the bot runs.
 	r.addSetup()
 
+	// /rolepanel sets up the role-choosing panel (Manage Server only).
+	if deps.Roles != nil {
+		r.addRolePanel()
+	}
+
 	// /rodok is for everyone and works in any channel.
 	r.add(&discordgo.ApplicationCommand{
 		Name:        "rodok",
@@ -385,6 +392,10 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 	customID := i.MessageComponentData().CustomID
 	if key, choice, ok := which.ParseCustomID(customID); ok {
 		r.onWhich(s, i, key, choice)
+		return
+	}
+	if roleID, ok := rolepanel.ParseCustomID(customID); ok {
+		r.onRole(s, i, roleID)
 		return
 	}
 	action, videoID, ok := outside.ParseCustomID(customID)

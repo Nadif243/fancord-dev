@@ -30,6 +30,7 @@ const (
 	defaultXFanLookupCap    = 20
 	defaultOutsideFile      = "data/outside.json"
 	defaultWhichFile        = "data/which.json"
+	defaultRolesFile        = "data/roles.json"
 	defaultMentionWords     = "yuura,yozakura"
 	defaultXUsername        = "YozakuraYuura"
 	defaultXPollSeconds     = 300
@@ -113,6 +114,7 @@ type Config struct {
 	HistoryFile    string // where it records every stream it sees, for the recap
 	PartnersFile   string // the collab partner list (CSV) the recap reads
 	WhichFile      string // the "who is meant?" questions about shared nicknames
+	RolesFile      string // the role panel: groups, roles, emoji and where the messages are
 	CollabFile     string // who people tagged as being in a stream, by hand
 	RodokFile      string // how many times each person has used /rodok on each other person
 	SettingsFile   string // what /setup saved; it beats .env for channels and roles
@@ -202,6 +204,10 @@ func Load(getenv func(string) string) (Config, error) {
 	c.X = loadX(get, &problems)
 	c.Translate = loadTranslate(get, &problems)
 
+	c.RolesFile = get("ROLES_FILE")
+	if c.RolesFile == "" {
+		c.RolesFile = defaultRolesFile
+	}
 	c.WhichFile = get("WHICH_FILE")
 	if c.WhichFile == "" {
 		c.WhichFile = defaultWhichFile

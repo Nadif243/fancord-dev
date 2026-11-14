@@ -990,3 +990,167 @@ const (
 	SetupWarnFansRestart = "Fan channel: set, but the bot is not reading message content yet. It needs the Message Content Intent switched on in the Developer Portal and one restart."
 	SetupWarnFansNoYT    = "Fan channel: set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID)."
 )
+
+// ---- role panel (Indonesian for members, English for the staff) -----------
+
+const (
+	// The text under the heading of every group; the heading itself is stored with the group (see rolepanel.DefaultTitle).
+	RolePanelDescription = "Untuk mendapatkan roles, silahkan pilih role dengan cara memilih emoji"
+
+	RoleUnavailable  = "Role itu sudah tidak ada di panel ini. Coba muat ulang channelnya."
+	RoleFailed       = "Belum bisa mengubah rolemu sekarang. Coba lagi nanti, atau kabari admin."
+	RoleNoPermission = "Tidak ada izin untuk memberi role itu. Kabari admin ya."
+	RoleOff          = "Panel role belum aktif."
+
+	RolePanelCmdDescription      = "Set up the role panel (needs Manage Server)"
+	RolePanelShowDescription     = "Show the groups and roles of the panel"
+	RolePanelAddDescription      = "Put a role on the panel, or change it"
+	RolePanelRemoveDescription   = "Take a role off the panel"
+	RolePanelCategoryDescription = "Create a group, or change its rule or title"
+	RolePanelPublishDescription  = "Post the panel, or bring the posted messages up to date"
+	RolePanelGroupOption         = "The group (start typing to pick)"
+	RolePanelRoleOption          = "The role"
+	RolePanelEmojiOption         = "Its emoji: the emoji itself, or a server emoji"
+	RolePanelDescOption          = "The short text shown next to the emoji"
+	RolePanelNameOption          = "Name of the group, e.g. Interest 2"
+	RolePanelRuleOption          = "Any number of roles, or only one at a time"
+	RolePanelTitleOption         = "Heading of the message (default: Silahkan Pilih <name> Roles!)"
+	RolePanelChannelOption       = "Channel for the panel (kept for later; default: the last one used)"
+	RolePanelRuleAny             = "Any number"
+	RolePanelRuleOne             = "Only one"
+
+	RolePanelOff      = "The role panel is not available."
+	RolePanelDenied   = "Only people with Manage Server can set up the role panel."
+	RolePanelBad      = "I did not understand that. Try again."
+	RolePanelBadEmoji = "That does not look like an emoji. Paste the emoji itself (like 🎨), or a server emoji (like <:name:123456789012345678>)."
+	RolePanelNoGroup  = "There is no such group. Pick one from the list, or create it with /rolepanel category."
+	RolePanelFull     = "That group already has 25 roles, the most one message holds."
+	RolePanelEveryone = "@everyone cannot be on the panel."
+	RolePanelManaged  = "That role is managed by a bot or an integration, so it cannot be handed out."
+	RolePanelNoChan   = "Say where to post: use /rolepanel publish with a channel."
+	RolePanelNotOnIt  = "That role is not on the panel."
+	RolePanelNoSave   = "\n⚠️ I could not save the file, so this holds only until the bot restarts."
+)
+
+// RoleGot is the private answer to someone who just got a role. dropped are
+// the roles of the same group that were taken away.
+func RoleGot(name string, dropped []string) string {
+	text := "Kamu sekarang punya role **" + escape(name) + "**."
+	if len(dropped) > 0 {
+		text += " Role " + escapeBold(dropped) + " dilepas."
+	}
+	return text
+}
+
+// RoleLost is the private answer to someone who pressed a role they had.
+func RoleLost(name string) string { return "Role **" + escape(name) + "** sudah dilepas." }
+
+func escapeBold(names []string) string {
+	out := make([]string, len(names))
+	for i, n := range names {
+		out[i] = "**" + escape(n) + "**"
+	}
+	return strings.Join(out, ", ")
+}
+
+// RolePanelRisky explains why a role cannot be on the panel.
+func RolePanelRisky(roleID string) string {
+	return "<@&" + roleID + "> can manage the server, its members or messages, so anybody could hand it to themselves. Only roles without those permissions can be on the panel."
+}
+
+// RolePanelRoleLine is one role in /rolepanel show.
+type RolePanelRoleLine struct{ ID, Emoji, Desc string }
+
+// RolePanelCat is one group in /rolepanel show.
+type RolePanelCat struct {
+	Name, Key, Title string
+	One, Posted      bool
+	Roles            []RolePanelRoleLine
+}
+
+// RolePanelShow lists the setup.
+func RolePanelShow(channel string, cats []RolePanelCat) string {
+	var b strings.Builder
+	if channel == "" {
+		b.WriteString("**Role panel** · no channel yet (give one to /rolepanel publish)\n")
+	} else {
+		fmt.Fprintf(&b, "**Role panel** · channel <#%s>\n", channel)
+	}
+	if len(cats) == 0 {
+		b.WriteString("No groups yet. Create one with /rolepanel category.")
+		return b.String()
+	}
+	for _, c := range cats {
+		rule := "any number"
+		if c.One {
+			rule = "only one"
+		}
+		state := "not posted"
+		if c.Posted {
+			state = "posted"
+		}
+		fmt.Fprintf(&b, "\n**%s** (`%s`) · %s · %s\n", escape(c.Name), c.Key, rule, state)
+		if len(c.Roles) == 0 {
+			b.WriteString("  (no roles)\n")
+		}
+		for _, r := range c.Roles {
+			line := fmt.Sprintf("  %s <@&%s>", r.Emoji, r.ID)
+			if r.Desc != "" {
+				line += " — " + escape(shorten(r.Desc, 40))
+			}
+			b.WriteString(line + "\n")
+		}
+	}
+	return shorten(b.String(), 1950)
+}
+
+// RolePanelAdded says a role was put on the panel.
+func RolePanelAdded(roleID, group string, moved bool) string {
+	text := "✅ <@&" + roleID + "> is on the panel in **" + escape(group) + "**."
+	if moved {
+		text += " (It was in another group; it moved.)"
+	}
+	return text + " Run /rolepanel publish to update the message."
+}
+
+// RolePanelRemoved says a role was taken off the panel.
+func RolePanelRemoved(roleID string) string {
+	return "✅ <@&" + roleID + "> is off the panel. Run /rolepanel publish to update the message."
+}
+
+// RolePanelGroupSaved says a group was created or changed.
+func RolePanelGroupSaved(name string, created, one bool) string {
+	verb, rule := "changed", "any number of roles"
+	if created {
+		verb = "created"
+	}
+	if one {
+		rule = "only one role at a time"
+	}
+	return fmt.Sprintf("✅ Group **%s** %s: %s. It is posted last; add roles with /rolepanel add, then /rolepanel publish.", escape(name), verb, rule)
+}
+
+// RolePanelPublished reports a publish.
+func RolePanelPublished(channel string, posted, updated, deleted int, fixed, missing, unsafe []string) string {
+	var b strings.Builder
+	if posted+updated+deleted == 0 {
+		fmt.Fprintf(&b, "Nothing to post in <#%s>: add roles first.", channel)
+	} else {
+		fmt.Fprintf(&b, "✅ Panel in <#%s>: %d posted, %d updated, %d removed.", channel, posted, updated, deleted)
+	}
+	if len(fixed) > 0 {
+		b.WriteString("\nFound again by name (the saved ID was wrong, now corrected): " + escape(strings.Join(fixed, ", ")))
+	}
+	if len(missing) > 0 {
+		b.WriteString("\n⚠️ Not on this server, so left out: " + escape(strings.Join(missing, ", ")) + ". Put them back with /rolepanel add.")
+	}
+	if len(unsafe) > 0 {
+		b.WriteString("\n⚠️ Left out because they can manage the server, its members or messages, or belong to a bot: " + escape(strings.Join(unsafe, ", ")) + ".")
+	}
+	return b.String()
+}
+
+// RolePanelPublishFailed reports a publish that stopped halfway.
+func RolePanelPublishFailed(err error) string {
+	return "⚠️ I could not finish posting the panel: " + err.Error() + "\nCheck that I can see the channel, send messages and embed links there, then run /rolepanel publish again."
+}

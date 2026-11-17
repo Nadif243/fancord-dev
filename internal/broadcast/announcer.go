@@ -53,15 +53,17 @@ type Announcer struct {
 	// The roles to ping, asked each time; "" means no ping.
 	upcomingRole, liveRole func() string
 
-	// Set for the community's channel (see WithCommunity). Its messages name the channel, and a new upload gets one message and a ping of videoRole.
-	community string
+	// videoRole is pinged for a new video or Short ("" means no ping).
 	videoRole func() string
+
+	// Set for the community's channel (see WithCommunity): its messages name the channel.
+	community string
 
 	mu sync.Mutex // Discord runs each command in its own goroutine; one Update at a time
 }
 
 func NewAnnouncer(m Messenger, channelID string, mem Memory) *Announcer {
-	return &Announcer{m: m, channel: constant(channelID), mem: mem, upcomingRole: constant(""), liveRole: constant("")}
+	return &Announcer{m: m, channel: constant(channelID), mem: mem, upcomingRole: constant(""), liveRole: constant(""), videoRole: constant("")}
 }
 
 func constant(s string) func() string { return func() string { return s } }
@@ -84,9 +86,15 @@ func (a *Announcer) WithPings(upcomingRole, liveRole string) *Announcer {
 	return a
 }
 
-// WithCommunity makes this announcer the one for the community's channel: its messages carry the channel's name, and ordinary uploads are announced too, pinging videoRole (asked each time; "" means no ping). Give it a Memory of its own, not the one her streams use: Waiting must only ever list the waiting rooms of the channel that its poller looks at.
-func (a *Announcer) WithCommunity(name string, videoRole func() string) *Announcer {
-	a.community, a.videoRole = name, videoRole
+// WithVideoRole sets the role pinged for a new video or Short, asked each time.
+func (a *Announcer) WithVideoRole(role func() string) *Announcer {
+	a.videoRole = role
+	return a
+}
+
+// WithCommunity makes this announcer the one for the community's channel: its messages carry the channel's name. Give it a Memory of its own, not the one her streams use: Waiting must only ever list the waiting rooms of the channel that its poller looks at.
+func (a *Announcer) WithCommunity(name string) *Announcer {
+	a.community = name
 	return a
 }
 
@@ -103,7 +111,7 @@ func (a *Announcer) Update(s Stream) error {
 	a.mu.Lock()
 	defer a.mu.Unlock() // note: the lock is held during the Discord call, fine at this size
 
-	if s.Kind == KindVideo {
+	if s.IsUpload() {
 		return a.upload(s)
 	}
 	text := a.textFor(s)
@@ -162,13 +170,14 @@ func (a *Announcer) Update(s Stream) error {
 
 // upload announces an ordinary upload once. It is never edited afterwards, and one that is already announced (or a Memory that cannot say) is left alone.
 func (a *Announcer) upload(s Stream) error {
-	if a.community == "" {
-		return nil // only the community's channel announces uploads
-	}
 	if _, seen := a.mem.Get(s.VideoID); seen {
 		return nil
 	}
-	text := msg.CommunityVideo(a.community, s.Title, s.URL())
+	short := s.Kind == KindShort
+	text := msg.VideoNew(s.Title, s.URL(), short)
+	if a.community != "" {
+		text = msg.CommunityVideo(a.community, s.Title, s.URL(), short)
+	}
 	ch := a.channel()
 	id, err := a.m.Send(ch, text)
 	if err != nil {
@@ -178,7 +187,11 @@ func (a *Announcer) upload(s Stream) error {
 		return err
 	}
 	if role := a.videoRole(); role != "" {
-		if err := a.m.Ping(ch, msg.PingCommunityVideo(role, a.community, s.Title, s.URL()), role); err != nil {
+		ping := msg.PingVideo(role, s.Title, s.URL(), short)
+		if a.community != "" {
+			ping = msg.PingCommunityVideo(role, a.community, s.Title, s.URL(), short)
+		}
+		if err := a.m.Ping(ch, ping, role); err != nil {
 			return fmt.Errorf("announced %s but could not ping: %w", s.VideoID, err)
 		}
 	}

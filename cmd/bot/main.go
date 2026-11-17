@@ -116,7 +116,8 @@ func run(log *slog.Logger) error {
 
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
 		WithChannel(channel(settings.Announce)).
-		WithPingFuncs(live.PingUpcoming, live.PingLive)
+		WithPingFuncs(live.PingUpcoming, live.PingLive).
+		WithVideoRole(live.PingLive) // a new video or Short pings the same role as a live stream
 
 	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
 	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory()).
@@ -322,8 +323,9 @@ func run(log *slog.Logger) error {
 		back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log).
 			WithOps(channel(settings.Ops))
 		start(back.Run)
-		start(poller.New(source, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
-			OnFirstCheck(back.FirstCheckDone).Run)
+		// Her new videos and Shorts are announced and kept in the history (marked as such, so the recap ignores them); her premieres count as streams.
+		start(poller.New(youtube.ActivitySource{C: yt}, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
+			WithPremieres().OnFirstCheck(back.FirstCheckDone).Run)
 		start(recapService.Run)
 		start(review.Run)
 		start(asks.Run)
@@ -350,11 +352,17 @@ func run(log *slog.Logger) error {
 			}
 			return live.Get(settings.Announce)
 		}
-		role := func() string { return cfg.Community.Role }
+		// Its role: ROLE_PING_COMMUNITY when set, else the very same roles as hers (so a change made with /setup applies here too).
+		upcomingRole, liveRole := live.PingUpcoming, live.PingLive
+		if cfg.Community.Role != "" {
+			own := func() string { return cfg.Community.Role }
+			upcomingRole, liveRole = own, own
+		}
 		ann := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, community).
 			WithChannel(where).
-			WithPingFuncs(role, role).
-			WithCommunity(cfg.Community.Name, role)
+			WithPingFuncs(upcomingRole, liveRole).
+			WithVideoRole(liveRole).
+			WithCommunity(cfg.Community.Name)
 		start(poller.New(youtube.ActivitySource{C: yt}, ann, nil, cfg.Community.ChannelID, cfg.Community.PollEvery,
 			log.With("channel", "community")).WithPremieres().Run)
 	}

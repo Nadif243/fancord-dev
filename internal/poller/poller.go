@@ -74,7 +74,7 @@ func New(source Source, announcer Announcer, recorder Recorder, channelID string
 	}
 }
 
-// WithPremieres makes premieres count as streams: they get the same waiting room, live and ended messages. Her own channel does not use it.
+// WithPremieres makes premieres count as streams: they get the same waiting room, live and ended messages.
 func (p *Poller) WithPremieres() *Poller {
 	p.premieres = true
 	return p
@@ -131,7 +131,7 @@ func (p *Poller) check(parent context.Context) {
 			continue
 		}
 		passed++
-		if p.recorder != nil { // none for the community channel: it stays out of the recap
+		if p.recorder != nil { // none for the community channel: it stays out of the history
 			if err := p.recorder.Record(st); err != nil {
 				p.log.Warn("saving to the history failed, will try again", "video", st.VideoID, "err", err)
 			}
@@ -192,10 +192,10 @@ func abandoned(st broadcast.Stream, now time.Time) bool {
 	return !st.StartAt.IsZero() && st.StartAt.Before(now.Add(-staleAfter))
 }
 
-// worth is worthAnnouncing plus the two things only some channels have: uploads (only new ones count; an unknown publish time is not "new") and, when asked for, premieres.
+// worth is worthAnnouncing plus two more rules: uploads (only new ones count; an unknown publish time is not "new") and, when asked for, premieres.
 func (p *Poller) worth(st broadcast.Stream, now time.Time, known bool) bool {
 	switch {
-	case st.Kind == broadcast.KindVideo:
+	case st.IsUpload():
 		return known || (!st.StartAt.IsZero() && now.Sub(st.StartAt) <= maxVideoAge)
 	case st.Kind == broadcast.KindPremiere && p.premieres:
 		st.Kind = broadcast.KindStream // judged like a stream; the announcer still sees the premiere

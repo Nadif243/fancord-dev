@@ -58,8 +58,7 @@ func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int)
 	return c.scan(ctx, channelID, pages, false)
 }
 
-// RecentActivity is RecentStreams plus the ordinary uploads: each one comes back as a Stream of Kind KindVideo whose StartAt is when it was published.
-// It costs the same. The community channel uses it; her own channel does not, because her cover songs and clips are not announced.
+// RecentActivity is RecentStreams plus the ordinary uploads: each one comes back as a Stream of Kind KindVideo, or KindShort when it is on the channel's Shorts list, whose StartAt is when it was published. It costs one more quota unit per check (the Shorts list).
 func (c *Client) RecentActivity(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
 	return c.scan(ctx, channelID, pages, true)
 }
@@ -84,6 +83,14 @@ func (c *Client) scan(ctx context.Context, channelID string, pages int, uploads 
 		return broadcast.Scan{}, err
 	}
 
+	// "UUSH" is the channel's Shorts list. Without it (a failed read) every upload is called a video, which is only a wrong word, not a missed one.
+	var shorts map[string]bool
+	if uploads {
+		if shorts, err = c.videoIDs(ctx, "UUSH"+rest, pages); err != nil {
+			shorts = nil
+		}
+	}
+
 	var scan broadcast.Scan
 	pageToken := ""
 	for page := 0; page < pages; page++ {
@@ -92,7 +99,7 @@ func (c *Client) scan(ctx context.Context, channelID string, pages int, uploads 
 			return broadcast.Scan{}, err
 		}
 		if len(ids) > 0 {
-			found, err := c.streamsAmong(ctx, ids, liveTab, uploads)
+			found, err := c.streamsAmong(ctx, ids, liveTab, uploads, shorts)
 			if err != nil {
 				return broadcast.Scan{}, err
 			}
@@ -210,7 +217,7 @@ func (c *Client) Videos(ctx context.Context, ids []string) (map[string]Video, er
 }
 
 // streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids. Only those carry liveStreamingDetails, which is how we tell them from ordinary uploads.
-func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool, uploads bool) ([]broadcast.Stream, error) {
+func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool, uploads bool, shorts map[string]bool) ([]broadcast.Stream, error) {
 	var details videosResponse
 	err := c.get(ctx, "videos", url.Values{
 		"part": {"snippet,liveStreamingDetails,contentDetails"},
@@ -230,7 +237,7 @@ func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[str
 			if st, isStream := toStream(v, liveTab); isStream {
 				streams = append(streams, st)
 			} else if uploads && v.LiveStreamingDetails == nil {
-				streams = append(streams, toUpload(v))
+				streams = append(streams, toUpload(v, shorts))
 			}
 		}
 	}
@@ -264,9 +271,13 @@ func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
 }
 
 // toUpload turns an ordinary upload into a Stream. It has no live state; the published time (zero when YouTube did not give one) is what the poller uses to tell a new video from an old one.
-func toUpload(v video) broadcast.Stream {
+func toUpload(v video, shorts map[string]bool) broadcast.Stream {
+	kind := broadcast.KindVideo
+	if shorts[v.ID] {
+		kind = broadcast.KindShort
+	}
 	return broadcast.Stream{
-		VideoID: v.ID, Title: v.Snippet.Title, Kind: broadcast.KindVideo,
+		VideoID: v.ID, Title: v.Snippet.Title, Kind: kind,
 		State: broadcast.Ended, StartAt: firstTime(v.Snippet.PublishedAt),
 	}
 }

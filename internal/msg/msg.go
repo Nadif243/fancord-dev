@@ -111,8 +111,8 @@ func CommunityEnded(name, title, url string, premiere bool) string {
 	return fmt.Sprintf("⚫ **%s** · %s: %s\n%s", word, escape(shorten(name, 80)), escape(title), url)
 }
 
-func CommunityVideo(name, title, url string) string {
-	return fmt.Sprintf("📺 **Video baru** · %s: %s\n%s", escape(shorten(name, 80)), escape(title), url)
+func CommunityVideo(name, title, url string, short bool) string {
+	return fmt.Sprintf("%s · %s: %s\n%s", videoHead(short), escape(shorten(name, 80)), escape(title), url)
 }
 
 // The pings of the community channel (one role, if any, for all of them). The link is in <angle brackets> so Discord does not show a second preview.
@@ -137,8 +137,32 @@ func PingCommunityLive(roleID, name, title, url string, premiere bool) string {
 	return fmt.Sprintf("🔴 <@&%s> **%s** · %s: %s\n<%s>", roleID, word, escape(shorten(name, 80)), escape(title), url)
 }
 
-func PingCommunityVideo(roleID, name, title, url string) string {
-	return fmt.Sprintf("📺 <@&%s> **Video baru** · %s: %s\n<%s>", roleID, escape(shorten(name, 80)), escape(title), url)
+func PingCommunityVideo(roleID, name, title, url string, short bool) string {
+	return fmt.Sprintf("%s · %s: %s\n<%s>", videoPingHead(roleID, short), escape(shorten(name, 80)), escape(title), url)
+}
+
+// A new video or Short on her own channel: one message, never edited, and a ping of the same role as her streams.
+
+func VideoNew(title, url string, short bool) string {
+	return fmt.Sprintf("%s: %s\n%s", videoHead(short), escape(title), url)
+}
+
+func PingVideo(roleID, title, url string, short bool) string {
+	return fmt.Sprintf("%s: %s\n<%s>", videoPingHead(roleID, short), escape(title), url)
+}
+
+func videoHead(short bool) string {
+	if short {
+		return "📱 **Short baru**"
+	}
+	return "📺 **Video baru**"
+}
+
+func videoPingHead(roleID string, short bool) string {
+	if short {
+		return fmt.Sprintf("📱 <@&%s> **Short baru**", roleID)
+	}
+	return fmt.Sprintf("📺 <@&%s> **Video baru**", roleID)
 }
 
 // The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended. A premiere (a finished video released with a countdown) says so.

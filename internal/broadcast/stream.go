@@ -19,7 +19,8 @@ type Kind int
 const (
 	KindStream   Kind = iota + 1 // a real live broadcast: what her Live tab lists
 	KindPremiere                 // a finished video released with a countdown
-	KindVideo                    // an ordinary upload; only the community channel announces these
+	KindVideo                    // an ordinary upload: announced once, never edited
+	KindShort                    // a Short: the same, told apart from a video
 )
 
 // Stream is what every source (YouTube, a tweet, /collab) boils down to.
@@ -28,7 +29,7 @@ type Stream struct {
 	Title   string
 	State   State
 	Kind    Kind      // 0 (unset) is treated as a stream
-	StartAt time.Time // scheduled start; for a KindVideo, when it was published; zero means "not known"
+	StartAt time.Time // scheduled start; for a video or Short, when it was published; zero means "not known"
 	EndAt   time.Time // when it ended; the zero value means "not over, or not known"
 
 	// Channel is the name of the channel it happens on when that is not hers:
@@ -47,3 +48,6 @@ type Scan struct {
 	Streams []Stream // the streams and premieres among them, newest first
 	Notes   []string // anything that makes the result less certain, for humans
 }
+
+// IsUpload says the stream is an ordinary upload (a video or a Short): it has no waiting room or live state, only a moment it was published.
+func (s Stream) IsUpload() bool { return s.Kind == KindVideo || s.Kind == KindShort }

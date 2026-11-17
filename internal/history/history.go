@@ -24,7 +24,13 @@ type Entry struct {
 	State   string    `json:"state"` // "upcoming", "live" or "ended"
 	Start   time.Time `json:"start"` // zero when unknown
 	End     time.Time `json:"end"`   // zero until it has ended
+
+	// Kind is "" for a live stream (every entry from before this field was/ kept is one), or "premiere", "video" or "short". Only streams count for the recap, the nickname questions and /collab; the rest is kept so the history says everything the bot announced.
+	Kind string `json:"kind,omitempty"`
 }
+
+// IsStream says the entry is a live stream.
+func (e Entry) IsStream() bool { return e.Kind == "" }
 
 // Duration is how long the stream ran, or 0 when we do not know.
 func (e Entry) Duration() time.Duration {
@@ -78,7 +84,7 @@ func (f *File) Record(s broadcast.Stream) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	e := Entry{VideoID: s.VideoID, Title: s.Title, State: stateName(s.State), Start: s.StartAt.UTC(), End: s.EndAt.UTC()}
+	e := Entry{VideoID: s.VideoID, Title: s.Title, State: stateName(s.State), Start: s.StartAt.UTC(), End: s.EndAt.UTC(), Kind: kindName(s.Kind)}
 	if s.StartAt.IsZero() {
 		e.Start = time.Time{}
 	}
@@ -89,6 +95,10 @@ func (f *File) Record(s broadcast.Stream) error {
 	if old, ok := f.data.Streams[s.VideoID]; ok {
 		if stateRank(e.State) < stateRank(old.State) {
 			return nil
+		}
+		// A stream that has just ended may not be on the Live tab yet and look like a premiere for a while. Once it was seen as a stream it stays one, or it would fall out of the recap.
+		if old.IsStream() && e.Kind == "premiere" {
+			e.Kind = ""
 		}
 		if old == e {
 			return nil
@@ -107,7 +117,7 @@ func (f *File) Ended(from, to time.Time) []Entry {
 	var out []Entry
 	for _, e := range f.data.Streams {
 		at := e.finishedAt()
-		if e.State == "ended" && !at.IsZero() && !at.Before(from) && at.Before(to) {
+		if e.IsStream() && e.State == "ended" && !at.IsZero() && !at.Before(from) && at.Before(to) {
 			out = append(out, e)
 		}
 	}
@@ -125,7 +135,7 @@ func (f *File) Week(from, to, carry time.Time) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.State != "ended" {
+		if !e.IsStream() || e.State != "ended" {
 			continue
 		}
 		start, end := e.startedAt(), e.finishedAt()
@@ -156,7 +166,7 @@ func (f *File) Running(since, before time.Time) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.State == "live" && !e.Start.IsZero() && !e.Start.Before(since) && e.Start.Before(before) {
+		if e.IsStream() && e.State == "live" && !e.Start.IsZero() && !e.Start.Before(since) && e.Start.Before(before) {
 			out = append(out, e)
 		}
 	}
@@ -179,7 +189,7 @@ func (f *File) Recent(n int) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.State != "upcoming" {
+		if e.IsStream() && e.State != "upcoming" {
 			out = append(out, e)
 		}
 	}
@@ -210,6 +220,19 @@ func (e Entry) finishedAt() time.Time {
 		return e.End
 	}
 	return e.Start
+}
+
+func kindName(k broadcast.Kind) string {
+	switch k {
+	case broadcast.KindPremiere:
+		return "premiere"
+	case broadcast.KindVideo:
+		return "video"
+	case broadcast.KindShort:
+		return "short"
+	default:
+		return ""
+	}
 }
 
 func stateName(s broadcast.State) string {

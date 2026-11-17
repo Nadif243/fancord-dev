@@ -19,6 +19,9 @@ const (
 	// The longest one check may take, however slow YouTube is.
 	checkTimeout = 30 * time.Second
 
+	// An upload older than this is not new. It also keeps a first run on a channel from announcing the whole back catalogue.
+	maxVideoAge = 48 * time.Hour
+
 	// An announced waiting room that is missing from this many checks in a row/ is taken to be gone. More than one, so a single odd answer from YouTube cannot cancel a real one.
 	vanishedAfter = 3
 )
@@ -55,6 +58,8 @@ type Poller struct {
 	now       func() time.Time // a field so tests can set the clock
 
 	// Only the goroutine running Run touches these, so they need no lock.
+	premieres bool // announce premieres like streams (the community channel does)
+
 	first   func()          // runs once, after the first check that worked; may be nil
 	checked bool            // has one check succeeded yet?
 	warned  map[string]bool // notes already logged, so they are not repeated every time
@@ -67,6 +72,12 @@ func New(source Source, announcer Announcer, recorder Recorder, channelID string
 		every: every, log: log, now: time.Now,
 		warned: map[string]bool{}, missing: map[string]int{},
 	}
+}
+
+// WithPremieres makes premieres count as streams: they get the same waiting room, live and ended messages. Her own channel does not use it.
+func (p *Poller) WithPremieres() *Poller {
+	p.premieres = true
+	return p
 }
 
 // OnFirstCheck registers a function that runs once, right after the first check that worked (when the history and the announcements are up to date with what happened while the bot was off).
@@ -116,12 +127,14 @@ func (p *Poller) check(parent context.Context) {
 	// YouTube lists newest first. Going from the end announces the oldest first, so several new streams appear in the order they were made.
 	for i := len(scan.Streams) - 1; i >= 0; i-- {
 		st := scan.Streams[i]
-		if !worthAnnouncing(st, now, p.announcer.Knows(st.VideoID)) {
+		if !p.worth(st, now, p.announcer.Knows(st.VideoID)) {
 			continue
 		}
 		passed++
-		if err := p.recorder.Record(st); err != nil {
-			p.log.Warn("saving to the history failed, will try again", "video", st.VideoID, "err", err)
+		if p.recorder != nil { // none for the community channel: it stays out of the recap
+			if err := p.recorder.Record(st); err != nil {
+				p.log.Warn("saving to the history failed, will try again", "video", st.VideoID, "err", err)
+			}
 		}
 		if err := p.announcer.Update(st); err != nil {
 			p.log.Warn("announcing failed, will try again", "video", st.VideoID, "err", err)
@@ -179,7 +192,18 @@ func abandoned(st broadcast.Stream, now time.Time) bool {
 	return !st.StartAt.IsZero() && st.StartAt.Before(now.Add(-staleAfter))
 }
 
-// worthAnnouncing is the bot's policy on what counts. (Whether a stream that already over gets a message is the announcer's decision, not ours.)
+// worth is worthAnnouncing plus the two things only some channels have: uploads (only new ones count; an unknown publish time is not "new") and, when asked for, premieres.
+func (p *Poller) worth(st broadcast.Stream, now time.Time, known bool) bool {
+	switch {
+	case st.Kind == broadcast.KindVideo:
+		return known || (!st.StartAt.IsZero() && now.Sub(st.StartAt) <= maxVideoAge)
+	case st.Kind == broadcast.KindPremiere && p.premieres:
+		st.Kind = broadcast.KindStream // judged like a stream; the announcer still sees the premiere
+	}
+	return worthAnnouncing(st, now, known)
+}
+
+// worthAnnouncing is the bot's policy on what counts. (Whether a stream that is already over gets a message is the announcer's decision, not ours.)
 //
 // known says the stream already has an announcement. Then it was judged to be a stream while it was still upcoming or live, which is more reliable than the guess made once it is over (a stream that just ended may not be on the Live tab list yet, and would look like a premiere). So it keeps being updated.
 func worthAnnouncing(st broadcast.Stream, now time.Time, known bool) bool {

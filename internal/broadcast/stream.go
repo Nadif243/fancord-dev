@@ -19,6 +19,7 @@ type Kind int
 const (
 	KindStream   Kind = iota + 1 // a real live broadcast: what her Live tab lists
 	KindPremiere                 // a finished video released with a countdown
+	KindVideo                    // an ordinary upload; only the community channel announces these
 )
 
 // Stream is what every source (YouTube, a tweet, /collab) boils down to.
@@ -27,7 +28,7 @@ type Stream struct {
 	Title   string
 	State   State
 	Kind    Kind      // 0 (unset) is treated as a stream
-	StartAt time.Time // scheduled start; the zero value means "not known"
+	StartAt time.Time // scheduled start; for a KindVideo, when it was published; zero means "not known"
 	EndAt   time.Time // when it ended; the zero value means "not over, or not known"
 
 	// Channel is the name of the channel it happens on when that is not hers:

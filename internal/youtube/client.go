@@ -55,6 +55,23 @@ func NewClient(apiKey string) *Client {
 //
 // Cost per page: 1 unit for the uploads list, 1 for the details, and 1 for the Live tab list.
 func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
+	return c.scan(ctx, channelID, pages, false)
+}
+
+// RecentActivity is RecentStreams plus the ordinary uploads: each one comes back as a Stream of Kind KindVideo whose StartAt is when it was published.
+// It costs the same. The community channel uses it; her own channel does not, because her cover songs and clips are not announced.
+func (c *Client) RecentActivity(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
+	return c.scan(ctx, channelID, pages, true)
+}
+
+// ActivitySource lets the poller use RecentActivity where it expects a RecentStreams.
+type ActivitySource struct{ C *Client }
+
+func (a ActivitySource) RecentStreams(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
+	return a.C.RecentActivity(ctx, channelID, pages)
+}
+
+func (c *Client) scan(ctx context.Context, channelID string, pages int, uploads bool) (broadcast.Scan, error) {
 	if !channelIDPattern.MatchString(channelID) {
 		return broadcast.Scan{}, errors.New("channel ID must start with UC and be 24 characters long")
 	}
@@ -75,7 +92,7 @@ func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int)
 			return broadcast.Scan{}, err
 		}
 		if len(ids) > 0 {
-			found, err := c.streamsAmong(ctx, ids, liveTab)
+			found, err := c.streamsAmong(ctx, ids, liveTab, uploads)
 			if err != nil {
 				return broadcast.Scan{}, err
 			}
@@ -193,7 +210,7 @@ func (c *Client) Videos(ctx context.Context, ids []string) (map[string]Video, er
 }
 
 // streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids. Only those carry liveStreamingDetails, which is how we tell them from ordinary uploads.
-func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool) ([]broadcast.Stream, error) {
+func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool, uploads bool) ([]broadcast.Stream, error) {
 	var details videosResponse
 	err := c.get(ctx, "videos", url.Values{
 		"part": {"snippet,liveStreamingDetails,contentDetails"},
@@ -212,6 +229,8 @@ func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[str
 		if v, ok := byID[id]; ok {
 			if st, isStream := toStream(v, liveTab); isStream {
 				streams = append(streams, st)
+			} else if uploads && v.LiveStreamingDetails == nil {
+				streams = append(streams, toUpload(v))
 			}
 		}
 	}
@@ -242,6 +261,14 @@ func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
 	st.EndAt = firstTime(d.ActualEndTime)
 	st.Kind = kindOf(st.State, v.ID, v.ContentDetails.Duration, liveTab)
 	return st, true
+}
+
+// toUpload turns an ordinary upload into a Stream. It has no live state; the published time (zero when YouTube did not give one) is what the poller uses to tell a new video from an old one.
+func toUpload(v video) broadcast.Stream {
+	return broadcast.Stream{
+		VideoID: v.ID, Title: v.Snippet.Title, Kind: broadcast.KindVideo,
+		State: broadcast.Ended, StartAt: firstTime(v.Snippet.PublishedAt),
+	}
 }
 
 // kindOf decides stream or premiere, using two clues.
@@ -395,6 +422,7 @@ type video struct {
 		Description  string `json:"description"`
 		ChannelID    string `json:"channelId"`
 		ChannelTitle string `json:"channelTitle"`
+		PublishedAt  string `json:"publishedAt"`
 		// "upcoming", "live" or "none"
 		LiveBroadcastContent string `json:"liveBroadcastContent"`
 	} `json:"snippet"`

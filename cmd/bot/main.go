@@ -224,6 +224,10 @@ func run(log *slog.Logger) error {
 		LinkChannel:      channel(settings.Fans),
 		ReviewRole:       channel(settings.Reviewer),
 		Settings:         live,
+
+		// Members of this role cannot be rodok-ed (ROLE_RODOK_PROTECTED; empty means nobody is protected).
+		RodokProtectedRole: cfg.RodokProtectedRole,
+
 		// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents). Asking for it without that switch makes Discord refuse the connection, so it is asked for only when a fan channel is set at start. A channel set later by /setup then needs one restart.
 		ListeningForMessages: listening,
 	})
@@ -325,6 +329,34 @@ func run(log *slog.Logger) error {
 		start(asks.Run)
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
+	}
+
+	// The community's channel: its own memory file, announcer and poller, and no history, so it never reaches the recap or the collab features.
+	switch {
+	case cfg.Community.ChannelID == "":
+		// not set up
+	case yt == nil:
+		log.Warn("the community channel is set, but YOUTUBE_API_KEY is empty; it is ignored")
+	default:
+		community, err := store.Open(cfg.Community.File)
+		if err != nil {
+			return err
+		}
+		log.Info("community file ready", "path", cfg.Community.File, "channel", cfg.Community.Name)
+		// Its own destination, or the announcement channel when none is set.
+		where := func() string {
+			if cfg.Community.Channel != "" {
+				return cfg.Community.Channel
+			}
+			return live.Get(settings.Announce)
+		}
+		role := func() string { return cfg.Community.Role }
+		ann := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, community).
+			WithChannel(where).
+			WithPingFuncs(role, role).
+			WithCommunity(cfg.Community.Name, role)
+		start(poller.New(youtube.ActivitySource{C: yt}, ann, nil, cfg.Community.ChannelID, cfg.Community.PollEvery,
+			log.With("channel", "community")).WithPremieres().Run)
 	}
 
 	log.Info("bot is running; press Ctrl+C to stop", "version", version)

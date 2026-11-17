@@ -53,6 +53,10 @@ type Announcer struct {
 	// The roles to ping, asked each time; "" means no ping.
 	upcomingRole, liveRole func() string
 
+	// Set for the community's channel (see WithCommunity). Its messages name the channel, and a new upload gets one message and a ping of videoRole.
+	community string
+	videoRole func() string
+
 	mu sync.Mutex // Discord runs each command in its own goroutine; one Update at a time
 }
 
@@ -80,6 +84,12 @@ func (a *Announcer) WithPings(upcomingRole, liveRole string) *Announcer {
 	return a
 }
 
+// WithCommunity makes this announcer the one for the community's channel: its messages carry the channel's name, and ordinary uploads are announced too, pinging videoRole (asked each time; "" means no ping). Give it a Memory of its own, not the one her streams use: Waiting must only ever list the waiting rooms of the channel that its poller looks at.
+func (a *Announcer) WithCommunity(name string, videoRole func() string) *Announcer {
+	a.community, a.videoRole = name, videoRole
+	return a
+}
+
 // Knows reports whether this stream already has an announcement.
 func (a *Announcer) Knows(videoID string) bool {
 	a.mu.Lock()
@@ -93,7 +103,10 @@ func (a *Announcer) Update(s Stream) error {
 	a.mu.Lock()
 	defer a.mu.Unlock() // note: the lock is held during the Discord call, fine at this size
 
-	text := textFor(s)
+	if s.Kind == KindVideo {
+		return a.upload(s)
+	}
+	text := a.textFor(s)
 	prev, seen := a.mem.Get(s.VideoID)
 
 	switch {
@@ -147,6 +160,31 @@ func (a *Announcer) Update(s Stream) error {
 	}
 }
 
+// upload announces an ordinary upload once. It is never edited afterwards, and one that is already announced (or a Memory that cannot say) is left alone.
+func (a *Announcer) upload(s Stream) error {
+	if a.community == "" {
+		return nil // only the community's channel announces uploads
+	}
+	if _, seen := a.mem.Get(s.VideoID); seen {
+		return nil
+	}
+	text := msg.CommunityVideo(a.community, s.Title, s.URL())
+	ch := a.channel()
+	id, err := a.m.Send(ch, text)
+	if err != nil {
+		return err // not remembered, so the next Update tries again
+	}
+	if err := a.remember(Stream{VideoID: s.VideoID, State: Ended}, ch, id, text); err != nil {
+		return err
+	}
+	if role := a.videoRole(); role != "" {
+		if err := a.m.Ping(ch, msg.PingCommunityVideo(role, a.community, s.Title, s.URL()), role); err != nil {
+			return fmt.Errorf("announced %s but could not ping: %w", s.VideoID, err)
+		}
+	}
+	return nil
+}
+
 // Waiting lists the streams of her own channel that are announced as waiting rooms and not yet cancelled: the ones a vanished waiting room could be among.
 // Collabs on other channels are left out, because they are not on her channel and so cannot be told apart from vanished ones by looking at it.
 func (a *Announcer) Waiting() []string {
@@ -191,6 +229,12 @@ func (a *Announcer) ping(s Stream, channelID string) error {
 	upcoming, live := a.upcomingRole(), a.liveRole() // read once, so one ping uses one answer
 	var text, role string
 	switch {
+	case a.community != "" && s.State == Upcoming && upcoming != "":
+		role, text = upcoming, msg.PingCommunityUpcoming(upcoming, a.community, s.Title, s.URL(), s.StartAt, s.Kind == KindPremiere)
+	case a.community != "" && s.State == Live && live != "":
+		role, text = live, msg.PingCommunityLive(live, a.community, s.Title, s.URL(), s.Kind == KindPremiere)
+	case a.community != "":
+		return nil
 	case s.Channel != "" && s.State == Upcoming && upcoming != "":
 		role, text = upcoming, msg.PingCollabUpcoming(upcoming, s.Title, s.Channel, s.URL(), s.StartAt, s.Kind == KindPremiere)
 	case s.Channel != "" && s.State == Live && live != "":
@@ -219,7 +263,18 @@ func (a *Announcer) remember(s Stream, channelID, messageID, text string) error 
 	return nil
 }
 
-func textFor(s Stream) string {
+func (a *Announcer) textFor(s Stream) string {
+	if a.community != "" {
+		premiere := s.Kind == KindPremiere
+		switch s.State {
+		case Live:
+			return msg.CommunityLive(a.community, s.Title, s.URL(), premiere)
+		case Ended:
+			return msg.CommunityEnded(a.community, s.Title, s.URL(), premiere)
+		default:
+			return msg.CommunityUpcoming(a.community, s.Title, s.URL(), s.StartAt, premiere)
+		}
+	}
 	if s.Channel != "" {
 		premiere := s.Kind == KindPremiere
 		switch s.State {

@@ -81,6 +81,66 @@ func StreamEnded(title, url string) string {
 	return fmt.Sprintf("⚫ **Stream selesai**: %s\n%s", escape(title), url)
 }
 
+// The messages for the community's own channel. They follow the same life as her streams (waiting room, live, ended) and start with the same words, so the bot still recognises a waiting room by StreamUpcomingHead. The name of the channel comes right after, because several channels can share one text channel.
+// A premiere says so. A plain upload is one message that is never edited.
+
+func CommunityUpcoming(name, title, url string, start time.Time, premiere bool) string {
+	head := fmt.Sprintf("%s · %s: %s", StreamUpcomingHead, escape(shorten(name, 80)), escape(title))
+	if premiere {
+		head = fmt.Sprintf("%s · %s (premiere): %s", StreamUpcomingHead, escape(shorten(name, 80)), escape(title))
+	}
+	if start.IsZero() {
+		return head + "\n" + url
+	}
+	return fmt.Sprintf("%s\nMulai %s (%s)\n%s", head, stampFull(start), stamp(start), url)
+}
+
+func CommunityLive(name, title, url string, premiere bool) string {
+	word := "Sedang live!"
+	if premiere {
+		word = "Premiere sedang tayang!"
+	}
+	return fmt.Sprintf("🔴 **%s** · %s: %s\n%s", word, escape(shorten(name, 80)), escape(title), url)
+}
+
+func CommunityEnded(name, title, url string, premiere bool) string {
+	word := "Stream selesai"
+	if premiere {
+		word = "Premiere selesai"
+	}
+	return fmt.Sprintf("⚫ **%s** · %s: %s\n%s", word, escape(shorten(name, 80)), escape(title), url)
+}
+
+func CommunityVideo(name, title, url string) string {
+	return fmt.Sprintf("📺 **Video baru** · %s: %s\n%s", escape(shorten(name, 80)), escape(title), url)
+}
+
+// The pings of the community channel (one role, if any, for all of them). The link is in <angle brackets> so Discord does not show a second preview.
+
+func PingCommunityUpcoming(roleID, name, title, url string, start time.Time, premiere bool) string {
+	what := "Jadwal stream baru"
+	if premiere {
+		what = "Jadwal premiere baru"
+	}
+	head := fmt.Sprintf("⏰ <@&%s> **%s** · %s: %s", roleID, what, escape(shorten(name, 80)), escape(title))
+	if start.IsZero() {
+		return fmt.Sprintf("%s\n<%s>", head, url)
+	}
+	return fmt.Sprintf("%s\nMulai %s (%s)\n<%s>", head, stampFull(start), stamp(start), url)
+}
+
+func PingCommunityLive(roleID, name, title, url string, premiere bool) string {
+	word := "Sedang live!"
+	if premiere {
+		word = "Premiere sedang tayang!"
+	}
+	return fmt.Sprintf("🔴 <@&%s> **%s** · %s: %s\n<%s>", roleID, word, escape(shorten(name, 80)), escape(title), url)
+}
+
+func PingCommunityVideo(roleID, name, title, url string) string {
+	return fmt.Sprintf("📺 <@&%s> **Video baru** · %s: %s\n<%s>", roleID, escape(shorten(name, 80)), escape(title), url)
+}
+
 // The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended. A premiere (a finished video released with a countdown) says so.
 
 func CollabUpcoming(title, channel, url string, start time.Time, premiere bool) string {
@@ -701,14 +761,20 @@ func TweetLead(kind, target string, self bool) string {
 
 // TweetHeader is the first line of a card: the display name in bold and the handle, both a link to the post when a link is given.
 func TweetHeader(name, handle, link string) string {
-	text := "@" + escape(handle)
-	if name = strings.TrimSpace(name); name != "" {
-		text = "**" + escape(shorten(name, 60)) + "** (" + text + ")"
-	}
+	handle = strings.Map(func(r rune) rune {
+		if r == '_' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' {
+			return r
+		}
+		return -1
+	}, handle)
+	who := "@" + handle
 	if link != "" {
-		return "[" + text + "](" + link + ")"
+		who = "[" + who + "](" + link + ")"
 	}
-	return text
+	if name = strings.TrimSpace(name); name != "" {
+		return "**" + escape(shorten(name, 60)) + "** (" + who + ")"
+	}
+	return who
 }
 
 // TweetQuoteHead introduces a quoted post inside a card.
@@ -841,6 +907,9 @@ const (
 	// PLACEHOLDERS: Change the text here; nothing else needs to move.
 	RodokSelf = "Malu dikit, masa gooning di publik."
 	RodokBot  = "Don't be a clanker?? :(( #RobotLivesMatter"
+
+	// RodokProtected is the answer when the person picked has the protected role (see discord.rodokProtectedRole).
+	RodokProtected = "Adik ini belum legal, gaboleh dirodok."
 )
 
 // Rodok is the public answer. who and target are Discord user IDs, shown as mentions (the message is sent so that they ping nobody).

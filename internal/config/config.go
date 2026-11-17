@@ -21,27 +21,32 @@ var snowflake = regexp.MustCompile(`^\d{17,20}$`)
 var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 
 const (
-	defaultDataFile         = "data/state.json"
-	defaultHistoryFile      = "data/history.json"
-	defaultPartnersFile     = "partners.csv"
-	defaultCollabFile       = "data/collabs.json"
-	defaultRodokFile        = "data/rodok.json"
-	defaultSettingsFile     = "data/settings.json"
-	defaultXFanLookupCap    = 20
-	defaultOutsideFile      = "data/outside.json"
-	defaultWhichFile        = "data/which.json"
-	defaultRolesFile        = "data/roles.json"
-	defaultMentionWords     = "yuura,yozakura"
-	defaultXUsername        = "YozakuraYuura"
-	defaultXPollSeconds     = 300
-	minXPollSeconds         = 60
-	defaultXMonthlyCap      = 250
-	defaultTranslateTo      = "Indonesian"
-	minXMonthlyCap          = 10
-	defaultPollSeconds      = 120
-	minPollSeconds          = 30
-	defaultHeartbeatSeconds = 60
-	minHeartbeatSeconds     = 15
+	defaultDataFile      = "data/state.json"
+	defaultHistoryFile   = "data/history.json"
+	defaultPartnersFile  = "partners.csv"
+	defaultCollabFile    = "data/collabs.json"
+	defaultRodokFile     = "data/rodok.json"
+	defaultSettingsFile  = "data/settings.json"
+	defaultXFanLookupCap = 20
+	defaultOutsideFile   = "data/outside.json"
+	defaultWhichFile     = "data/which.json"
+	defaultRolesFile     = "data/roles.json"
+	defaultMentionWords  = "yuura,yozakura"
+	defaultXUsername     = "YozakuraYuura"
+	defaultXPollSeconds  = 300
+	minXPollSeconds      = 60
+	defaultXMonthlyCap   = 250
+	defaultTranslateTo   = "Indonesian"
+	minXMonthlyCap       = 10
+	defaultPollSeconds   = 120
+
+	// The community channel is checked less often: nobody needs its
+	// announcements to the minute, and every check costs YouTube quota.
+	defaultCommunityPollSeconds = 300
+	defaultCommunityFile        = "data/community.json"
+	minPollSeconds              = 30
+	defaultHeartbeatSeconds     = 60
+	minHeartbeatSeconds         = 15
 )
 
 // Channels are the places the bot posts to. They are separate settings so that in production each can be its own channel, while in dev they can all point at the one test channel.
@@ -97,6 +102,19 @@ type YouTube struct {
 	PollEvery time.Duration // how often the poller checks it
 }
 
+// Community is the community's own YouTube channel, announced next to hers.
+// It is optional: without a channel ID nothing here is used. It is a plain channel: no recap, no collab partners.
+type Community struct {
+	ChannelID string        // starts with UC; empty means off
+	Name      string        // how its messages call it
+	PollEvery time.Duration // how often it is checked
+	File      string        // what it announced (its own file, apart from hers)
+
+	// Where its messages go, and the role it pings (for waiting rooms, live streams and new uploads alike). Both optional: no channel means the announcement channel, no role means no ping.
+	Channel string
+	Role    string
+}
+
 // Pings are the roles the bot mentions. Both are optional: no role set, no ping.
 type Pings struct {
 	Upcoming string // a new waiting room appeared
@@ -124,10 +142,14 @@ type Config struct {
 	Channels       Channels
 	Pings          Pings
 	YouTube        YouTube
+	Community      Community
 	X              X
 	Translate      Translate
 	Review         Review
 	HeartbeatEvery time.Duration
+
+	// RodokProtectedRole is the role whose members cannot be rodok-ed: /rodok on them is refused. Empty: nobody is protected.
+	RodokProtectedRole string
 
 	// Written is what .env says for the things /setup can change, exactly as written (no defaults filled in). The settings package adds its own defaults and the saved /setup values on top.
 	Written settings.Env
@@ -180,6 +202,7 @@ func Load(getenv func(string) string) (Config, error) {
 	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
 	c.Pings.Both = optionalID("ROLE_PING", "")
 	c.Pings.Tweets = optionalID("ROLE_PING_TWEETS", "")
+	c.RodokProtectedRole = optionalID("ROLE_RODOK_PROTECTED", "")
 
 	// The key is never repeated in an error message, whatever is wrong with it.
 	c.YouTube.APIKey = get("YOUTUBE_API_KEY")
@@ -200,6 +223,10 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 	}
 	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
+
+	c.Community = loadCommunity(get, &problems)
+	c.Community.Channel = optionalID("CHANNEL_COMMUNITY", "")
+	c.Community.Role = optionalID("ROLE_PING_COMMUNITY", "")
 
 	c.X = loadX(get, &problems)
 	c.Translate = loadTranslate(get, &problems)
@@ -400,4 +427,37 @@ func quote(s string) string {
 		return "nothing"
 	}
 	return strconv.Quote(s)
+}
+
+// loadCommunity reads the community channel's settings. The ID and the name go together: one without the other is a mistake, not "off".
+func loadCommunity(get func(string) string, problems *[]string) Community {
+	var c Community
+	id, name := get("COMMUNITY_YOUTUBE_CHANNEL_ID"), get("COMMUNITY_NAME")
+	switch {
+	case id == "" && name == "":
+		// off
+	case id == "" || name == "":
+		*problems = append(*problems, "COMMUNITY_YOUTUBE_CHANNEL_ID and COMMUNITY_NAME go together: set both or neither")
+	case !youtubeChannelID.MatchString(id):
+		*problems = append(*problems, "COMMUNITY_YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got "+quote(id))
+	default:
+		c.ChannelID, c.Name = id, name
+	}
+
+	secs := defaultCommunityPollSeconds
+	if v := get("COMMUNITY_POLL_SECONDS"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < minPollSeconds {
+			*problems = append(*problems, "COMMUNITY_POLL_SECONDS must be a whole number of "+strconv.Itoa(minPollSeconds)+" or more, got "+quote(v))
+		} else {
+			secs = n
+		}
+	}
+	c.PollEvery = time.Duration(secs) * time.Second
+
+	c.File = get("COMMUNITY_FILE")
+	if c.File == "" {
+		c.File = defaultCommunityFile
+	}
+	return c
 }

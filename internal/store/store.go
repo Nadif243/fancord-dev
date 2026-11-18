@@ -1,4 +1,7 @@
-// Package store keeps the bot's memory in a JSON file, so that a restart does not make it forget what it already announced.
+// Package store keeps the bot's small memory in one JSON file, so that a restart
+// does not make it forget things: which streams it already announced (and where),
+// when the last recap and reminder were handled, when the bot was last running,
+// and what the tweet relay has seen.
 package store
 
 import (
@@ -7,10 +10,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
+	"github.com/Nadif243/fancord-bot/internal/atomicfile"
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/relay"
 )
@@ -97,32 +100,9 @@ func (f *File) Get(videoID string) (broadcast.Announced, bool) {
 
 // Put remembers the record and then saves the file. If saving fails the record is still remembered for this run, and the error is returned.
 func (f *File) Put(videoID string, a broadcast.Announced) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.data.Announced[videoID] = record{MessageID: a.MessageID, State: int(a.State), Text: a.Text, ChannelID: a.ChannelID}
-	return f.save()
-}
-
-// LastRecap is the end of the last recap window that was posted; the zero time when no recap has been handled yet.
-func (f *File) LastRecap() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.data.LastRecap
-}
-
-// LastRecapPosted is when the last recap was actually posted; the zero time when that is not known (an older file, or no recap yet).
-func (f *File) LastRecapPosted() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.data.LastRecapPosted
-}
-
-// SetLastRecapPosted remembers when a recap was posted. As with the other markers, the value is kept for this run even if saving fails.
-func (f *File) SetLastRecapPosted(t time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.data.LastRecapPosted = t.UTC()
-	return f.save()
+	return f.update(func(d *fileData) {
+		d.Announced[videoID] = record{MessageID: a.MessageID, State: int(a.State), Text: a.Text, ChannelID: a.ChannelID}
+	})
 }
 
 // IDs lists the videos that have an announcement.
@@ -136,96 +116,85 @@ func (f *File) IDs() []string {
 	return out
 }
 
-// LastReminder is the moment of the last collab reminder that was handled; the zero time when none has been.
-func (f *File) LastReminder() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.data.LastReminder
+// The markers. Each Set keeps the value for this run even if saving fails, and says so in the error.
+
+// LastRecap is the end of the last recap window that was posted; the zero time when no recap has been handled yet.
+func (f *File) LastRecap() time.Time {
+	return read(f, func(d *fileData) time.Time { return d.LastRecap })
 }
 
-// SetLastReminder remembers that the reminder due at t is handled. As with SetLastRecap, the value is kept for this run even if saving fails.
+// SetLastRecap remembers that the recap for the window ending at t is done.
+func (f *File) SetLastRecap(t time.Time) error {
+	return f.update(func(d *fileData) { d.LastRecap = t.UTC() })
+}
+
+// LastRecapPosted is when the last recap was actually posted; the zero time when that is not known (an older file, or no recap yet).
+func (f *File) LastRecapPosted() time.Time {
+	return read(f, func(d *fileData) time.Time { return d.LastRecapPosted })
+}
+
+// SetLastRecapPosted remembers when a recap was posted.
+func (f *File) SetLastRecapPosted(t time.Time) error {
+	return f.update(func(d *fileData) { d.LastRecapPosted = t.UTC() })
+}
+
+// LastReminder is the moment of the last collab reminder that was handled; the zero time when none has been.
+func (f *File) LastReminder() time.Time {
+	return read(f, func(d *fileData) time.Time { return d.LastReminder })
+}
+
+// SetLastReminder remembers that the reminder due at t is handled.
 func (f *File) SetLastReminder(t time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.data.LastReminder = t.UTC()
-	return f.save()
+	return f.update(func(d *fileData) { d.LastReminder = t.UTC() })
 }
 
 // LastAlive is the last moment the bot was seen running; the zero time on the first run.
 func (f *File) LastAlive() time.Time {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.data.LastAlive
+	return read(f, func(d *fileData) time.Time { return d.LastAlive })
 }
 
-// SetLastAlive remembers that the bot is running at t. As with the other markers, the value is kept for this run even if saving fails.
+// SetLastAlive remembers that the bot is running at t.
 func (f *File) SetLastAlive(t time.Time) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.data.LastAlive = t.UTC()
-	return f.save()
+	return f.update(func(d *fileData) { d.LastAlive = t.UTC() })
 }
 
 // Relay is what the tweet relay remembered. The returned value is a copy.
 func (f *File) Relay() relay.State {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	st := f.data.Relay
-	st.Links = append([]relay.Link(nil), st.Links...)
-	return st
+	return read(f, func(d *fileData) relay.State {
+		st := d.Relay
+		st.Links = append([]relay.Link(nil), st.Links...)
+		return st
+	})
 }
 
-// SetRelay remembers the tweet relay's state. As with the other markers, the value is kept for this run even if saving fails.
+// SetRelay remembers the tweet relay's state.
 func (f *File) SetRelay(st relay.State) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
 	st.Links = append([]relay.Link(nil), st.Links...)
-	f.data.Relay = st
-	return f.save()
+	return f.update(func(d *fileData) { d.Relay = st })
 }
 
-// SetLastRecap remembers that the recap for the window ending at t is done.
-// As with Put, the value is kept for this run even if saving fails.
-func (f *File) SetLastRecap(t time.Time) error {
+// read returns one value out of the data, under the lock.
+func read[T any](f *File, get func(*fileData) T) T {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.data.LastRecap = t.UTC()
+	return get(&f.data)
+}
+
+// update changes the data under the lock and then saves it.
+func (f *File) update(change func(*fileData)) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	change(&f.data)
 	return f.save()
 }
 
-// save writes to a temporary file next to the real one and then renames it over the real one. A crash halfway through therefore leaves the old file intact, never half a file.
+// save rewrites the whole file (atomicfile writes a temporary file and renames it, so a crash never leaves half a file).
 func (f *File) save() error {
 	raw, err := json.MarshalIndent(f.data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode state: %w", err)
 	}
-
-	dir := filepath.Dir(f.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".state-*.tmp")
-	if err != nil {
-		return fmt.Errorf("save state: %w", err)
-	}
-	cleanup := func() { _ = os.Remove(tmp.Name()) }
-
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("save state: %w", err)
-	}
-	if err := tmp.Sync(); err != nil { // make sure the bytes are on disk before the rename
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("save state: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("save state: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), f.path); err != nil {
-		cleanup()
+	if err := atomicfile.Write(f.path, raw); err != nil {
 		return fmt.Errorf("save state: %w", err)
 	}
 	return nil

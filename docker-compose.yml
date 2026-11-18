@@ -1,6 +1,8 @@
 # Run the bot:        docker compose up -d --build
 # Watch what it says: docker compose logs -f
 # Stop it:            docker compose down
+#
+# The version shown in the heartbeat message: put BOT_VERSION=1.0.0 in .env (or leave it out for the default below), then rebuild with `docker compose up -d --build`.
 
 services:
   bot:
@@ -8,8 +10,8 @@ services:
       context: .
       args:
         VERSION: ${BOT_VERSION:-0.1.0-docker}
-    image: fancord-bot:local
-    container_name: fancord-bot
+    image: fancord-bot:real
+    container_name: fancord-bot-real
 
     # Start again after a crash or a reboot, unless I stopped it myself.
     restart: unless-stopped
@@ -21,6 +23,7 @@ services:
 
     volumes:
       # The bot's memory (history, collab tags, what was announced). It lives on this PC, so it survives rebuilding or deleting the container.
+      # Docker Desktop on Windows or Mac needs nothing more. On a Linux host the bot runs as user 10001 and makes its files private (0600), so give it the folder once: sudo chown -R 10001 data
       - ./data:/app/data
       # The partner list, read-only. Edit it on this PC, then run `docker compose restart` (the bot reads it once at start).
       - ./partners.csv:/app/partners.csv:ro

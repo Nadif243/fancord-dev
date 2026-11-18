@@ -75,17 +75,26 @@ var All = []Info{
 	{Reviewer, RoleKind, "Reviewer role", ""},
 }
 
+// byKey is All as a map, built once, so a lookup does not scan the list.
+var byKey = func() map[Key]Info {
+	m := make(map[Key]Info, len(All))
+	for _, i := range All {
+		m[i.Key] = i
+	}
+	return m
+}()
+
 // Lookup finds the description of a key.
 func Lookup(k Key) (Info, bool) {
-	for _, i := range All {
-		if i.Key == k {
-			return i, true
-		}
-	}
-	return Info{}, false
+	i, ok := byKey[k]
+	return i, ok
 }
 
+// A Discord ID ("snowflake") is a number of 17 to 20 digits.
 var snowflake = regexp.MustCompile(`^\d{17,20}$`)
+
+// IsID says whether s looks like a Discord ID. It is the one definition of that, so the config and /setup agree on what a valid ID is.
+func IsID(s string) bool { return snowflake.MatchString(s) }
 
 // Source says where an effective value came from.
 type Source int
@@ -154,7 +163,7 @@ func Open(path string, env Env) (*Live, error) {
 	}
 	for k, v := range d.Values {
 		// A key from a newer or older bot, or a hand-edited mistake, is skipped rather than trusted.
-		if _, ok := Lookup(k); ok && snowflake.MatchString(v) {
+		if _, ok := Lookup(k); ok && IsID(v) {
 			l.data.Values[k] = v
 		}
 	}
@@ -166,6 +175,9 @@ func (l *Live) Get(k Key) string {
 	v, _ := l.Where(k)
 	return v
 }
+
+// Getter returns a function that asks for the key's value each time it is called. It is what the parts of the bot that post somewhere are given, so a change made with /setup shows up at their next message.
+func (l *Live) Getter(k Key) func() string { return func() string { return l.Get(k) } }
 
 // Where is Get plus where the value came from.
 func (l *Live) Where(k Key) (string, Source) {
@@ -211,7 +223,7 @@ func (l *Live) Set(k Key, id string) error {
 	if _, ok := Lookup(k); !ok {
 		return fmt.Errorf("%w: unknown setting %q", ErrRefused, k)
 	}
-	if !snowflake.MatchString(id) {
+	if !IsID(id) {
 		return fmt.Errorf("%w: %q is not a Discord ID", ErrRefused, id)
 	}
 	l.mu.Lock()

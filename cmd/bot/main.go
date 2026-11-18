@@ -43,6 +43,12 @@ import (
 //	go build -ldflags "-X main.version=0.2.0" ./cmd/bot
 var version = "0.1.0-dev"
 
+// The gateway intents the bot asks for besides Guilds, written as Discord's own bit numbers (see its "Gateway Intents" table) rather than by the library's names.
+const (
+	intentGuildMessages  = discordgo.Intent(1 << 9)
+	intentMessageContent = discordgo.Intent(1 << 15) // privileged
+)
+
 func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	if err := run(log); err != nil {
@@ -51,27 +57,7 @@ func main() {
 	}
 }
 
-// loadPartners reads the collab partner list. No file is fine (the recap then has no collab line, and /collab has no names to offer); a file with mistakes stops the bot, with every mistake listed, because quietly ignoring it would hide partners from the recap.
-// The result is nil when there is no list; a nil *partners.Book is a valid, empty one.
-func loadPartners(path string, log *slog.Logger) (*partners.Book, error) {
-	book, err := partners.Load(path)
-	switch {
-	case errors.Is(err, fs.ErrNotExist):
-		log.Info("no partners file: the recap will not list collab partners", "path", path)
-		return nil, nil
-	case err != nil:
-		return nil, err
-	}
-	log.Info("partners file ready", "path", path, "partners", book.Len())
-	return book, nil
-}
-
-// Gateway intents beyond the default. They are written as numbers (Discord's own bit values) rather than by the library's names.
-const (
-	intentGuildMessages  = discordgo.Intent(1 << 9)
-	intentMessageContent = discordgo.Intent(1 << 15) // privileged
-)
-
+// run builds everything, connects to Discord, starts the background jobs and waits for the signal to stop. Building comes first and the pieces are made in the helper functions below, so a mistake in a file or a setting stops the bot before it connects.
 func run(log *slog.Logger) error {
 	// A missing .env is fine (the settings may come from the real environment).
 	if err := godotenv.Load(); err != nil && !errors.Is(err, fs.ErrNotExist) {
@@ -86,8 +72,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("create discord session: %w", err)
 	}
-	s.Identify.Intents = discordgo.IntentsGuilds // no privileged intents needed yet
-
+	s.Identify.Intents = discordgo.IntentsGuilds // the privileged one is added below, only when needed
 	messenger := discord.SessionMessenger{S: s}
 
 	memory, err := store.Open(cfg.DataFile)
@@ -112,17 +97,16 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	log.Info("settings file ready", "path", cfg.SettingsFile)
-	channel := func(k settings.Key) func() string { return func() string { return live.Get(k) } }
 
 	announcer := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
-		WithChannel(channel(settings.Announce)).
+		WithChannel(live.Getter(settings.Announce)).
 		WithPingFuncs(live.PingUpcoming, live.PingLive).
 		WithVideoRole(live.PingLive) // a new video or Short pings the same role as a live stream
 
 	// /devstream gets its own announcer whose memory is only RAM, so fake streams never end up in the state file next to the real ones.
+	// It has no ping roles: /devstream must never tag the real role.
 	devAnnouncer := broadcast.NewAnnouncer(messenger, cfg.Channels.Test, broadcast.NewMapMemory()).
-		WithChannel(channel(settings.Staff))
-	// No ping roles: /devstream must never tag the real role.
+		WithChannel(live.Getter(settings.Staff))
 
 	// Stays nil without a YouTube key; /devcheck then says YouTube is not set up.
 	var source discord.StreamSource
@@ -132,66 +116,21 @@ func run(log *slog.Logger) error {
 		source = yt
 	}
 
-	// The recap reads the history, so it only makes sense while the poller
-	// is filling it.
-	pollerOn := source != nil && cfg.YouTube.ChannelID != ""
-	var recapService *recap.Service
-	var collab discord.CollabTagger // stays a nil interface when the recap is off
-	var review *outside.Service     // collabs on other channels; nil when YouTube is off
-	var asks *which.Service         // "who is meant?" questions; nil when YouTube is off
-	if pollerOn {
-		book, err := loadPartners(cfg.PartnersFile, log)
+	// Everything that reads her YouTube channel. The recap reads the history, so it only makes sense while the poller is filling it.
+	var yf *youtubeFeatures
+	if yt != nil && cfg.YouTube.ChannelID != "" {
+		yf, err = buildYouTubeFeatures(cfg, log, yt, streams, memory, messenger, live, announcer)
 		if err != nil {
 			return err
 		}
-		tags, err := collabs.OpenFile(cfg.CollabFile)
-		if err != nil {
-			return err
-		}
-		log.Info("collab tags file ready", "path", cfg.CollabFile)
-
-		// Who was in a stream = named in its title + tagged by hand - removed by hand.
-		// The recap and /collab both go through this one service.
-		who := collabs.NewService(book, tags, streams)
-		recapService = recap.New(streams, messenger, memory, cfg.Channels.Recap, cfg.YouTube.PollEvery+time.Minute, log).
-			WithPartners(who, cfg.Channels.Ops).
-			WithReminder(cfg.Channels.Test, memory).
-			WithLiveChannels(channel(settings.Recap), channel(settings.Ops), channel(settings.Reminder))
-		collab = who
-
-		questions, err := which.OpenFile(cfg.WhichFile)
-		if err != nil {
-			return err
-		}
-		log.Info("nickname questions file ready", "path", cfg.WhichFile)
-		asks = which.New(questions, streams, who, tags, messenger, which.Settings{ChannelFn: channel(settings.Review)}, log)
-
-		decisions, err := outside.OpenFile(cfg.Review.File)
-		if err != nil {
-			return err
-		}
-		log.Info("collab review file ready", "path", cfg.Review.File)
-		review = outside.New(decisions, yt, messenger, book, outside.Settings{
-			ChannelID:      cfg.Channels.Approval,
-			ChannelFn:      channel(settings.Review),
-			OwnChannelID:   cfg.YouTube.ChannelID,
-			MentionWords:   cfg.Review.MentionWords,
-			IgnoreChannels: cfg.Review.IgnoreChannels,
-		}, log).WithAnnouncer(announcer)
-		if cfg.X.BearerToken != "" && cfg.X.FanLookupCap > 0 {
-			// Its own client: the relay's runs in another goroutine.
-			review.WithX(xapi.NewClient(cfg.X.BearerToken), cfg.X.FanLookupCap)
-		}
-		recapService.WithGuests(review) // confirmed collabs on other channels join the weekly recap
 	}
-	var reviewer discord.CollabReviewer // stays a nil interface when review is off
-	if review != nil {
-		reviewer = review
+
+	rel := buildRelay(cfg, log, memory, messenger, live, yf)
+	community, err := buildCommunity(cfg, log, yt, messenger, live)
+	if err != nil {
+		return err
 	}
-	var chooser discord.NicknameAsker // stays a nil interface when there are no questions
-	if asks != nil {
-		chooser = asks
-	}
+
 	// The role panel needs no YouTube; it only reads and writes its own file.
 	panelFile, err := rolepanel.OpenStore(cfg.RolesFile, rolepanel.Seed())
 	if err != nil {
@@ -199,47 +138,37 @@ func run(log *slog.Logger) error {
 	}
 	log.Info("role panel file ready", "path", cfg.RolesFile)
 	panel := discord.PanelAdapter{S: s}
-	roles := rolepanel.New(panelFile, panel, panel)
 
-	var preview discord.RecapPreviewer          // stays a nil interface when the recap is off
-	var remindPreview discord.ReminderPreviewer // same for the reminder
-	if recapService != nil {
-		preview = recapService
-		remindPreview = recapService
-	}
+	// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents).
+	// Asking for it without that switch makes Discord refuse the connection, so it is asked for only when a fan channel is set at start. A channel set later by /setup then needs one restart.
+	listening := yf != nil && live.Get(settings.Fans) != ""
 
-	listening := reviewer != nil && live.Get(settings.Fans) != ""
-	router := discord.NewRouter(log, discord.Deps{
-		DevAnnouncer:     devAnnouncer,
-		DevChannelID:     cfg.Channels.Test,
-		Source:           source,
-		YouTubeChannelID: cfg.YouTube.ChannelID,
-		Recap:            preview,
-		Reminder:         remindPreview,
-		Collab:           collab,
-		Outside:          reviewer,
-		Which:            chooser,
-		Rodok:            rodok.New(rodokCounts),
-		Roles:            roles,
-		DevChannel:       channel(settings.Staff),
-		LinkChannel:      channel(settings.Fans),
-		ReviewRole:       channel(settings.Reviewer),
-		Settings:         live,
-
-		// Members of this role cannot be rodok-ed (ROLE_RODOK_PROTECTED; empty means nobody is protected).
-		RodokProtectedRole: cfg.RodokProtectedRole,
-
-		// Reading what people type needs the Message Content intent, which must also be switched on in the Developer Portal (Bot -> Privileged Gateway Intents). Asking for it without that switch makes Discord refuse the connection, so it is asked for only when a fan channel is set at start. A channel set later by /setup then needs one restart.
+	deps := discord.Deps{
+		DevAnnouncer:         devAnnouncer,
+		DevChannelID:         cfg.Channels.Test,
+		Source:               source,
+		YouTubeChannelID:     cfg.YouTube.ChannelID,
+		Rodok:                rodok.New(rodokCounts),
+		Roles:                rolepanel.New(panelFile, panel, panel),
+		DevChannel:           live.Getter(settings.Staff),
+		LinkChannel:          live.Getter(settings.Fans),
+		ReviewRole:           live.Getter(settings.Reviewer),
+		Settings:             live,
+		RodokProtectedRole:   cfg.RodokProtectedRole, // members of this role cannot be rodok-ed; empty means nobody is protected
 		ListeningForMessages: listening,
-	})
+	}
+	yf.fill(&deps)
+	router := discord.NewRouter(log, deps)
+
 	s.AddHandler(router.OnInteraction)
-	if reviewer != nil {
+	if yf != nil {
 		s.AddHandler(router.OnMessage) // it ignores every channel but the fan channel
 	}
-	if listening {
+	switch {
+	case listening:
 		s.Identify.Intents |= intentGuildMessages | intentMessageContent
 		log.Info("fan collab-link channel is on", "channel", live.Get(settings.Fans))
-	} else if live.Get(settings.Fans) != "" {
+	case live.Get(settings.Fans) != "":
 		log.Warn("a fan collab-link channel is set, but collab review is off (it needs YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID); the channel is ignored")
 	}
 	s.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) {
@@ -278,93 +207,20 @@ func run(log *slog.Logger) error {
 		}()
 	}
 
-	// The tweet relay needs only X and Discord, not the YouTube poller.
-	if cfg.X.BearerToken != "" {
-		kinds := make([]xapi.Kind, len(cfg.X.Kinds))
-		for i, k := range cfg.X.Kinds {
-			kinds[i] = xapi.Kind(k)
-		}
-		// Japanese posts get a translation in their card, when a Gemini key is set.
-		var translator relay.Translator
-		if cfg.Translate.APIKey != "" {
-			translator = translate.NewGemini(cfg.Translate.APIKey, cfg.Translate.Model, cfg.Translate.To)
-		} else {
-			log.Info("tweet translation is off: set GEMINI_API_KEY and GEMINI_MODEL to turn it on")
-		}
-		rel := relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
-			Username:   cfg.X.Username,
-			ChannelID:  cfg.Channels.Tweets,
-			OpsID:      cfg.Channels.Ops,
-			ChannelFn:  channel(settings.Tweets),
-			OpsFn:      channel(settings.Ops),
-			RoleFn:     channel(settings.TweetPing),
-			Every:      cfg.X.PollEvery,
-			Kinds:      kinds,
-			MonthlyCap: cfg.X.MonthlyCap,
-			Cards:      cfg.X.Style == "card",
-			Translator: translator,
-		}, log)
-		if review != nil {
-			// YouTube links in her posts become collab candidates. Links the
-			// relay saw before this feature existed are picked up too.
-			rel.OnLinks(func(postID string, videoIDs []string) { review.Enqueue("tweet", postID, videoIDs...) })
-			review.Seed(memory.Relay().Links)
-		}
+	if rel != nil {
 		start(rel.Run)
-	} else {
-		log.Info("tweet relay is off: set X_BEARER_TOKEN to turn it on")
 	}
-
 	start(ops.NewHeartbeat(messenger, cfg.Channels.Ops, version, cfg.HeartbeatEvery, log).
-		WithChannel(channel(settings.Ops)).Run)
-
-	if pollerOn {
-		// Writes down "still running" every few minutes; after the first YouTube check of a start it tells the ops channel what happened while off.
-		back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log).
-			WithOps(channel(settings.Ops))
-		start(back.Run)
-		// Her new videos and Shorts are announced and kept in the history (marked as such, so the recap ignores them); her premieres count as streams.
-		start(poller.New(youtube.ActivitySource{C: yt}, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
-			WithPremieres().OnFirstCheck(back.FirstCheckDone).Run)
-		start(recapService.Run)
-		start(review.Run)
-		start(asks.Run)
+		WithChannel(live.Getter(settings.Ops)).Run)
+	if yf != nil {
+		for _, job := range yf.jobs {
+			start(job)
+		}
 	} else {
 		log.Info("youtube polling is off: set YOUTUBE_API_KEY and YOUTUBE_CHANNEL_ID to turn it on")
 	}
-
-	// The community's channel: its own memory file, announcer and poller, and no history, so it never reaches the recap or the collab features.
-	switch {
-	case cfg.Community.ChannelID == "":
-		// not set up
-	case yt == nil:
-		log.Warn("the community channel is set, but YOUTUBE_API_KEY is empty; it is ignored")
-	default:
-		community, err := store.Open(cfg.Community.File)
-		if err != nil {
-			return err
-		}
-		log.Info("community file ready", "path", cfg.Community.File, "channel", cfg.Community.Name)
-		// Its own destination, or the announcement channel when none is set.
-		where := func() string {
-			if cfg.Community.Channel != "" {
-				return cfg.Community.Channel
-			}
-			return live.Get(settings.Announce)
-		}
-		// Its role: ROLE_PING_COMMUNITY when set, else the very same roles as hers (so a change made with /setup applies here too).
-		upcomingRole, liveRole := live.PingUpcoming, live.PingLive
-		if cfg.Community.Role != "" {
-			own := func() string { return cfg.Community.Role }
-			upcomingRole, liveRole = own, own
-		}
-		ann := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, community).
-			WithChannel(where).
-			WithPingFuncs(upcomingRole, liveRole).
-			WithVideoRole(liveRole).
-			WithCommunity(cfg.Community.Name)
-		start(poller.New(youtube.ActivitySource{C: yt}, ann, nil, cfg.Community.ChannelID, cfg.Community.PollEvery,
-			log.With("channel", "community")).WithPremieres().Run)
+	if community != nil {
+		start(community)
 	}
 
 	log.Info("bot is running; press Ctrl+C to stop", "version", version)
@@ -372,4 +228,187 @@ func run(log *slog.Logger) error {
 	log.Info("shutting down")
 	wg.Wait() // let the heartbeat mark itself Offline before the connection closes
 	return nil
+}
+
+// youtubeFeatures is everything that depends on her YouTube channel being set up: the recap, collab tags, nickname questions and the review of collabs on other channels. A nil *youtubeFeatures means they are all off.
+type youtubeFeatures struct {
+	recap  *recap.Service
+	who    *collabs.Service // who was in a stream: named in the title, plus tags
+	review *outside.Service
+	asks   *which.Service
+
+	// jobs are what runs in the background, in the order they are started.
+	jobs []func(context.Context)
+}
+
+// buildYouTubeFeatures opens the files these features keep and puts them together, along with the jobs that keep them going.
+func buildYouTubeFeatures(
+	cfg config.Config, log *slog.Logger, yt *youtube.Client,
+	streams *history.File, memory *store.File, messenger discord.SessionMessenger,
+	live *settings.Live, announcer *broadcast.Announcer,
+) (*youtubeFeatures, error) {
+	book, err := loadPartners(cfg.PartnersFile, log)
+	if err != nil {
+		return nil, err
+	}
+	tags, err := collabs.OpenFile(cfg.CollabFile)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("collab tags file ready", "path", cfg.CollabFile)
+
+	// Who was in a stream = named in its title + tagged by hand - removed by hand.
+	// The recap and /collab both go through this one service.
+	who := collabs.NewService(book, tags, streams)
+
+	// The recap waits a little longer than one poll for a stream that just ended to be seen as ended.
+	settle := cfg.YouTube.PollEvery + time.Minute
+	rc := recap.New(streams, messenger, memory, cfg.Channels.Recap, settle, log).
+		WithPartners(who, cfg.Channels.Ops).
+		WithReminder(cfg.Channels.Test, memory).
+		WithLiveChannels(live.Getter(settings.Recap), live.Getter(settings.Ops), live.Getter(settings.Reminder))
+
+	questions, err := which.OpenFile(cfg.WhichFile)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("nickname questions file ready", "path", cfg.WhichFile)
+	asks := which.New(questions, streams, who, tags, messenger, which.Settings{ChannelFn: live.Getter(settings.Review)}, log)
+
+	decisions, err := outside.OpenFile(cfg.Review.File)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("collab review file ready", "path", cfg.Review.File)
+	review := outside.New(decisions, yt, messenger, book, outside.Settings{
+		ChannelID:      cfg.Channels.Approval,
+		ChannelFn:      live.Getter(settings.Review),
+		OwnChannelID:   cfg.YouTube.ChannelID,
+		MentionWords:   cfg.Review.MentionWords,
+		IgnoreChannels: cfg.Review.IgnoreChannels,
+	}, log).WithAnnouncer(announcer)
+	if cfg.X.BearerToken != "" && cfg.X.FanLookupCap > 0 {
+		// Its own client: the relay's runs in another goroutine.
+		review.WithX(xapi.NewClient(cfg.X.BearerToken), cfg.X.FanLookupCap)
+	}
+	rc.WithGuests(review) // confirmed collabs on other channels join the weekly recap
+
+	// Writes down "still running" every few minutes; after the first YouTube check of a start it tells the ops channel what happened while the bot was off.
+	back := catchup.New(memory, streams, announcer, messenger, cfg.Channels.Ops, log).
+		WithOps(live.Getter(settings.Ops))
+	// Her new videos and Shorts are announced and kept in the history (marked as such, so the recap ignores them); her premieres count as streams.
+	poll := poller.New(youtube.ActivitySource{C: yt}, announcer, streams, cfg.YouTube.ChannelID, cfg.YouTube.PollEvery, log).
+		WithPremieres().OnFirstCheck(back.FirstCheckDone)
+
+	return &youtubeFeatures{
+		recap: rc, who: who, review: review, asks: asks,
+		jobs: []func(context.Context){back.Run, poll.Run, rc.Run, review.Run, asks.Run},
+	}, nil
+}
+
+// fill hands the features to the slash commands. The fields stay nil (so each command says it is not set up) when the features are off.
+func (f *youtubeFeatures) fill(d *discord.Deps) {
+	if f == nil {
+		return
+	}
+	d.Recap, d.Reminder = f.recap, f.recap
+	d.Collab = f.who
+	d.Outside = f.review
+	d.Which = f.asks
+}
+
+// buildRelay makes the tweet relay, or returns nil when it is off. It needs only X and Discord, not the YouTube poller; yf (may be nil) gets the YouTube links found in her posts as collab candidates.
+func buildRelay(
+	cfg config.Config, log *slog.Logger, memory *store.File,
+	messenger discord.SessionMessenger, live *settings.Live, yf *youtubeFeatures,
+) *relay.Relay {
+	if cfg.X.BearerToken == "" {
+		log.Info("tweet relay is off: set X_BEARER_TOKEN to turn it on")
+		return nil
+	}
+	kinds := make([]xapi.Kind, len(cfg.X.Kinds))
+	for i, k := range cfg.X.Kinds {
+		kinds[i] = xapi.Kind(k)
+	}
+	// Japanese posts get a translation in their card, when a Gemini key is set.
+	var translator relay.Translator
+	if cfg.Translate.APIKey != "" {
+		translator = translate.NewGemini(cfg.Translate.APIKey, cfg.Translate.Model, cfg.Translate.To)
+	} else {
+		log.Info("tweet translation is off: set GEMINI_API_KEY and GEMINI_MODEL to turn it on")
+	}
+	rel := relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
+		Username:   cfg.X.Username,
+		ChannelID:  cfg.Channels.Tweets,
+		OpsID:      cfg.Channels.Ops,
+		ChannelFn:  live.Getter(settings.Tweets),
+		OpsFn:      live.Getter(settings.Ops),
+		RoleFn:     live.Getter(settings.TweetPing),
+		Every:      cfg.X.PollEvery,
+		Kinds:      kinds,
+		MonthlyCap: cfg.X.MonthlyCap,
+		Cards:      cfg.X.Style == "card",
+		Translator: translator,
+	}, log)
+	if yf != nil {
+		// YouTube links in her posts become collab candidates. Links the relay saw before this feature existed are picked up too.
+		rel.OnLinks(func(postID string, videoIDs []string) { yf.review.Enqueue("tweet", postID, videoIDs...) })
+		yf.review.Seed(memory.Relay().Links)
+	}
+	return rel
+}
+
+// buildCommunity makes the job for the community's channel, or returns nil when it is not set up. The channel has its own memory file, announcer and poller, and no history, so it never reaches the recap or the collab features.
+func buildCommunity(
+	cfg config.Config, log *slog.Logger, yt *youtube.Client,
+	messenger discord.SessionMessenger, live *settings.Live,
+) (func(context.Context), error) {
+	c := cfg.Community
+	switch {
+	case c.ChannelID == "":
+		return nil, nil // not set up
+	case yt == nil:
+		log.Warn("the community channel is set, but YOUTUBE_API_KEY is empty; it is ignored")
+		return nil, nil
+	}
+
+	memory, err := store.Open(c.File)
+	if err != nil {
+		return nil, err
+	}
+	log.Info("community file ready", "path", c.File, "channel", c.Name)
+
+	// Its own destination, or the announcement channel when none is set.
+	where := live.Getter(settings.Announce)
+	if c.Channel != "" {
+		where = func() string { return c.Channel }
+	}
+	// Its role: ROLE_PING_COMMUNITY when set, else the very same roles as hers (so a change made with /setup applies here too).
+	upcomingRole, liveRole := live.PingUpcoming, live.PingLive
+	if c.Role != "" {
+		own := func() string { return c.Role }
+		upcomingRole, liveRole = own, own
+	}
+	ann := broadcast.NewAnnouncer(messenger, cfg.Channels.Announce, memory).
+		WithChannel(where).
+		WithPingFuncs(upcomingRole, liveRole).
+		WithVideoRole(liveRole).
+		WithCommunity(c.Name)
+	return poller.New(youtube.ActivitySource{C: yt}, ann, nil, c.ChannelID, c.PollEvery,
+		log.With("channel", "community")).WithPremieres().Run, nil
+}
+
+// loadPartners reads the collab partner list. No file is fine (the recap then has no collab line, and /collab has no names to offer); a file with mistakes stops the bot, with every mistake listed, because quietly ignoring it would hide partners from the recap.
+// The result is nil when there is no list; a nil *partners.Book is a valid, empty one.
+func loadPartners(path string, log *slog.Logger) (*partners.Book, error) {
+	book, err := partners.Load(path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		log.Info("no partners file: the recap will not list collab partners", "path", path)
+		return nil, nil
+	case err != nil:
+		return nil, err
+	}
+	log.Info("partners file ready", "path", path, "partners", book.Len())
+	return book, nil
 }

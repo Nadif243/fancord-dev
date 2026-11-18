@@ -14,39 +14,42 @@ import (
 	"github.com/Nadif243/fancord-bot/internal/settings"
 )
 
-// A Discord ID ("snowflake") is a number of 17 to 20 digits.
-var snowflake = regexp.MustCompile(`^\d{17,20}$`)
-
 // A YouTube channel ID is "UC" followed by 22 letters, digits, "-" or "_".
 var youtubeChannelID = regexp.MustCompile(`^UC[A-Za-z0-9_-]{22}$`)
 
+// Where the bot keeps its files unless the .env says otherwise.
 const (
 	defaultDataFile      = "data/state.json"
 	defaultHistoryFile   = "data/history.json"
-	defaultPartnersFile  = "partners.csv"
 	defaultCollabFile    = "data/collabs.json"
-	defaultRodokFile     = "data/rodok.json"
-	defaultSettingsFile  = "data/settings.json"
-	defaultXFanLookupCap = 20
 	defaultOutsideFile   = "data/outside.json"
 	defaultWhichFile     = "data/which.json"
 	defaultRolesFile     = "data/roles.json"
-	defaultMentionWords  = "yuura,yozakura"
-	defaultXUsername     = "YozakuraYuura"
-	defaultXPollSeconds  = 300
-	minXPollSeconds      = 60
-	defaultXMonthlyCap   = 250
-	defaultTranslateTo   = "Indonesian"
-	minXMonthlyCap       = 10
-	defaultPollSeconds   = 120
+	defaultRodokFile     = "data/rodok.json"
+	defaultSettingsFile  = "data/settings.json"
+	defaultCommunityFile = "data/community.json"
+	defaultPartnersFile  = "partners.csv"
+)
 
-	// The community channel is checked less often: nobody needs its
-	// announcements to the minute, and every check costs YouTube quota.
-	defaultCommunityPollSeconds = 300
-	defaultCommunityFile        = "data/community.json"
+// How often things are checked, in seconds, and the least that is allowed.
+const (
+	defaultPollSeconds          = 120 // her YouTube channel
 	minPollSeconds              = 30
+	defaultCommunityPollSeconds = 300 // checked less often: nobody needs it to the minute, and every check costs quota
+	defaultXPollSeconds         = 300
+	minXPollSeconds             = 60
 	defaultHeartbeatSeconds     = 60
 	minHeartbeatSeconds         = 15
+)
+
+// Other defaults.
+const (
+	defaultMentionWords  = "yuura,yozakura"
+	defaultXUsername     = "YozakuraYuura"
+	defaultXMonthlyCap   = 250
+	minXMonthlyCap       = 10
+	defaultXFanLookupCap = 20
+	defaultTranslateTo   = "Indonesian"
 )
 
 // Channels are the places the bot posts to. They are separate settings so that in production each can be its own channel, while in dev they can all point at the one test channel.
@@ -155,176 +158,176 @@ type Config struct {
 	Written settings.Env
 }
 
+// loader reads settings and collects every problem it finds, so Load can report them all at once.
+type loader struct {
+	get      func(string) string
+	problems []string
+}
+
+func (l *loader) problem(text string) { l.problems = append(l.problems, text) }
+
+// requiredID reads a Discord ID that must be there.
+func (l *loader) requiredID(key string) string {
+	v := l.get(key)
+	if !settings.IsID(v) {
+		l.problem(key + " must be a Discord ID (17-20 digits), got " + quote(v))
+	}
+	return v
+}
+
+// id reads an optional Discord ID; fallback is used when it is not written.
+func (l *loader) id(key, fallback string) string {
+	v := l.get(key)
+	if v == "" {
+		return fallback
+	}
+	if !settings.IsID(v) {
+		l.problem(key + " must be a Discord ID (17-20 digits), got " + quote(v))
+	}
+	return v
+}
+
+// path reads a file name, or def when it is not written.
+func (l *loader) path(key, def string) string {
+	if v := l.get(key); v != "" {
+		return v
+	}
+	return def
+}
+
+// seconds reads a whole number of seconds, min or more, as a duration.
+func (l *loader) seconds(key string, def, min int) time.Duration {
+	secs := def
+	if v := l.get(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < min {
+			l.problem(key + " must be a whole number of " + strconv.Itoa(min) + " or more, got " + quote(v))
+		} else {
+			secs = n
+		}
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// number reads a whole number, min or more; what describes the rule in the error.
+func (l *loader) number(key string, def, min int, what string) int {
+	if v := l.get(key); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < min {
+			l.problem(key + " must be a whole number" + what + ", got " + quote(v))
+			return def
+		}
+		return n
+	}
+	return def
+}
+
+// youtubeID reads an optional YouTube channel ID.
+func (l *loader) youtubeID(key string) string {
+	v := l.get(key)
+	if v != "" && !youtubeChannelID.MatchString(v) {
+		l.problem(key + " must look like UC followed by 22 characters, got " + quote(v))
+	}
+	return v
+}
+
 // Load validates every setting and reports all problems at once, so you fix the .env file in one go instead of one error per run.
 func Load(getenv func(string) string) (Config, error) {
-	var problems []string
-	get := func(key string) string { return strings.TrimSpace(getenv(key)) }
-
+	l := &loader{get: func(key string) string { return strings.TrimSpace(getenv(key)) }}
 	var c Config
 
-	c.Token = get("DISCORD_TOKEN")
+	c.Token = l.get("DISCORD_TOKEN")
 	switch {
 	case c.Token == "":
-		problems = append(problems, "DISCORD_TOKEN is empty (Developer Portal > Bot > Reset Token)")
+		l.problem("DISCORD_TOKEN is empty (Developer Portal > Bot > Reset Token)")
 	case strings.HasPrefix(strings.ToLower(c.Token), "bot "):
-		problems = append(problems, `DISCORD_TOKEN must be the bare token, without the word "Bot"`)
+		l.problem(`DISCORD_TOKEN must be the bare token, without the word "Bot"`)
 	}
 
-	requireID := func(key string) string {
-		v := get(key)
-		if !snowflake.MatchString(v) {
-			problems = append(problems, key+" must be a Discord ID (17-20 digits), got "+quote(v))
-		}
-		return v
-	}
-	optionalID := func(key, fallback string) string {
-		v := get(key)
-		if v == "" {
-			return fallback
-		}
-		if !snowflake.MatchString(v) {
-			problems = append(problems, key+" must be a Discord ID (17-20 digits), got "+quote(v))
-		}
-		return v
-	}
-
-	c.AppID = requireID("DISCORD_APP_ID")
-	c.Channels.Test = requireID("CHANNEL_TEST")
-	c.GuildID = optionalID("GUILD_ID", "")
-	c.Channels.Ops = optionalID("CHANNEL_OPS", c.Channels.Test)
-	c.Channels.Announce = optionalID("CHANNEL_ANNOUNCE", c.Channels.Test)
-	c.Channels.Approval = optionalID("CHANNEL_APPROVAL", c.Channels.Test)
-	c.Channels.Recap = optionalID("CHANNEL_RECAP", c.Channels.Announce)
-	c.Channels.Tweets = optionalID("CHANNEL_TWEETS", c.Channels.Announce)
-	c.Channels.CollabLinks = optionalID("CHANNEL_COLLAB_LINKS", "")
-	c.Channels.Reminder = optionalID("CHANNEL_REMINDER", "")
-	c.Pings.Upcoming = optionalID("ROLE_PING_UPCOMING", "")
-	c.Pings.Live = optionalID("ROLE_PING_LIVE", "")
-	c.Pings.Both = optionalID("ROLE_PING", "")
-	c.Pings.Tweets = optionalID("ROLE_PING_TWEETS", "")
-	c.RodokProtectedRole = optionalID("ROLE_RODOK_PROTECTED", "")
+	c.AppID = l.requiredID("DISCORD_APP_ID")
+	c.Channels.Test = l.requiredID("CHANNEL_TEST")
+	c.GuildID = l.id("GUILD_ID", "")
+	c.Channels.Ops = l.id("CHANNEL_OPS", c.Channels.Test)
+	c.Channels.Announce = l.id("CHANNEL_ANNOUNCE", c.Channels.Test)
+	c.Channels.Approval = l.id("CHANNEL_APPROVAL", c.Channels.Test)
+	c.Channels.Recap = l.id("CHANNEL_RECAP", c.Channels.Announce)
+	c.Channels.Tweets = l.id("CHANNEL_TWEETS", c.Channels.Announce)
+	c.Channels.CollabLinks = l.id("CHANNEL_COLLAB_LINKS", "")
+	c.Channels.Reminder = l.id("CHANNEL_REMINDER", "")
+	c.Pings.Upcoming = l.id("ROLE_PING_UPCOMING", "")
+	c.Pings.Live = l.id("ROLE_PING_LIVE", "")
+	c.Pings.Both = l.id("ROLE_PING", "")
+	c.Pings.Tweets = l.id("ROLE_PING_TWEETS", "")
+	c.RodokProtectedRole = l.id("ROLE_RODOK_PROTECTED", "")
 
 	// The key is never repeated in an error message, whatever is wrong with it.
-	c.YouTube.APIKey = get("YOUTUBE_API_KEY")
-	if v := get("YOUTUBE_CHANNEL_ID"); v != "" {
-		if !youtubeChannelID.MatchString(v) {
-			problems = append(problems, "YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got "+quote(v))
-		}
-		c.YouTube.ChannelID = v
-	}
+	c.YouTube.APIKey = l.get("YOUTUBE_API_KEY")
+	c.YouTube.ChannelID = l.youtubeID("YOUTUBE_CHANNEL_ID")
+	c.YouTube.PollEvery = l.seconds("YOUTUBE_POLL_SECONDS", defaultPollSeconds, minPollSeconds)
 
-	pollSecs := defaultPollSeconds
-	if v := get("YOUTUBE_POLL_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minPollSeconds {
-			problems = append(problems, "YOUTUBE_POLL_SECONDS must be a whole number of "+strconv.Itoa(minPollSeconds)+" or more, got "+quote(v))
-		} else {
-			pollSecs = n
-		}
-	}
-	c.YouTube.PollEvery = time.Duration(pollSecs) * time.Second
+	c.Community = loadCommunity(l)
+	c.X = loadX(l)
+	c.Translate = loadTranslate(l)
 
-	c.Community = loadCommunity(get, &problems)
-	c.Community.Channel = optionalID("CHANNEL_COMMUNITY", "")
-	c.Community.Role = optionalID("ROLE_PING_COMMUNITY", "")
-
-	c.X = loadX(get, &problems)
-	c.Translate = loadTranslate(get, &problems)
-
-	c.RolesFile = get("ROLES_FILE")
-	if c.RolesFile == "" {
-		c.RolesFile = defaultRolesFile
-	}
-	c.WhichFile = get("WHICH_FILE")
-	if c.WhichFile == "" {
-		c.WhichFile = defaultWhichFile
-	}
-	c.PartnersFile = get("PARTNERS_FILE")
-	if c.PartnersFile == "" {
-		c.PartnersFile = defaultPartnersFile
-	}
-
-	c.Review.RoleID = optionalID("ROLE_COLLAB_REVIEW", "")
+	c.Review.RoleID = l.id("ROLE_COLLAB_REVIEW", "")
 	c.Written = settings.Env{
 		Values: map[settings.Key]string{
-			settings.Announce:  get("CHANNEL_ANNOUNCE"),
-			settings.Tweets:    get("CHANNEL_TWEETS"),
-			settings.Recap:     get("CHANNEL_RECAP"),
-			settings.Fans:      get("CHANNEL_COLLAB_LINKS"),
-			settings.Review:    get("CHANNEL_APPROVAL"),
-			settings.Ops:       get("CHANNEL_OPS"),
-			settings.Staff:     get("CHANNEL_TEST"),
-			settings.Reminder:  get("CHANNEL_REMINDER"),
-			settings.Ping:      get("ROLE_PING"),
-			settings.TweetPing: get("ROLE_PING_TWEETS"),
-			settings.Reviewer:  get("ROLE_COLLAB_REVIEW"),
+			settings.Announce:  l.get("CHANNEL_ANNOUNCE"),
+			settings.Tweets:    l.get("CHANNEL_TWEETS"),
+			settings.Recap:     l.get("CHANNEL_RECAP"),
+			settings.Fans:      l.get("CHANNEL_COLLAB_LINKS"),
+			settings.Review:    l.get("CHANNEL_APPROVAL"),
+			settings.Ops:       l.get("CHANNEL_OPS"),
+			settings.Staff:     l.get("CHANNEL_TEST"),
+			settings.Reminder:  l.get("CHANNEL_REMINDER"),
+			settings.Ping:      l.get("ROLE_PING"),
+			settings.TweetPing: l.get("ROLE_PING_TWEETS"),
+			settings.Reviewer:  l.get("ROLE_COLLAB_REVIEW"),
 		},
 		PingUpcoming: c.Pings.Upcoming,
 		PingLive:     c.Pings.Live,
 	}
-	c.Review.File = get("OUTSIDE_FILE")
-	if c.Review.File == "" {
-		c.Review.File = defaultOutsideFile
-	}
-	words := get("COLLAB_MENTION_WORDS")
+
+	words := l.get("COLLAB_MENTION_WORDS")
 	if words == "" {
 		words = defaultMentionWords
 	}
-	for _, w := range strings.Split(words, ",") {
-		if w = strings.TrimSpace(w); w != "" {
-			c.Review.MentionWords = append(c.Review.MentionWords, w)
-		}
-	}
-	for _, id := range strings.Split(get("COLLAB_IGNORE_CHANNELS"), ",") {
-		if id = strings.TrimSpace(id); id == "" {
-			continue
-		} else if !youtubeChannelID.MatchString(id) {
-			problems = append(problems, "COLLAB_IGNORE_CHANNELS must be YouTube channel IDs (UC followed by 22 characters), got "+quote(id))
+	c.Review.MentionWords = splitList(words)
+	for _, id := range splitList(l.get("COLLAB_IGNORE_CHANNELS")) {
+		if !youtubeChannelID.MatchString(id) {
+			l.problem("COLLAB_IGNORE_CHANNELS must be YouTube channel IDs (UC followed by 22 characters), got " + quote(id))
 		} else {
 			c.Review.IgnoreChannels = append(c.Review.IgnoreChannels, id)
 		}
 	}
 
-	c.CollabFile = get("COLLAB_FILE")
-	if c.CollabFile == "" {
-		c.CollabFile = defaultCollabFile
-	}
+	c.Review.File = l.path("OUTSIDE_FILE", defaultOutsideFile)
+	c.RolesFile = l.path("ROLES_FILE", defaultRolesFile)
+	c.WhichFile = l.path("WHICH_FILE", defaultWhichFile)
+	c.PartnersFile = l.path("PARTNERS_FILE", defaultPartnersFile)
+	c.CollabFile = l.path("COLLAB_FILE", defaultCollabFile)
+	c.SettingsFile = l.path("SETTINGS_FILE", defaultSettingsFile)
+	c.RodokFile = l.path("RODOK_FILE", defaultRodokFile)
+	c.HistoryFile = l.path("HISTORY_FILE", defaultHistoryFile)
+	c.DataFile = l.path("DATA_FILE", defaultDataFile)
 
-	c.SettingsFile = get("SETTINGS_FILE")
-	if c.SettingsFile == "" {
-		c.SettingsFile = defaultSettingsFile
-	}
+	c.HeartbeatEvery = l.seconds("HEARTBEAT_SECONDS", defaultHeartbeatSeconds, minHeartbeatSeconds)
 
-	c.RodokFile = get("RODOK_FILE")
-	if c.RodokFile == "" {
-		c.RodokFile = defaultRodokFile
-	}
-
-	c.HistoryFile = get("HISTORY_FILE")
-	if c.HistoryFile == "" {
-		c.HistoryFile = defaultHistoryFile
-	}
-
-	c.DataFile = get("DATA_FILE")
-	if c.DataFile == "" {
-		c.DataFile = defaultDataFile
-	}
-
-	secs := defaultHeartbeatSeconds
-	if v := get("HEARTBEAT_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minHeartbeatSeconds {
-			problems = append(problems, "HEARTBEAT_SECONDS must be a whole number of "+strconv.Itoa(minHeartbeatSeconds)+" or more, got "+quote(v))
-		} else {
-			secs = n
-		}
-	}
-	c.HeartbeatEvery = time.Duration(secs) * time.Second
-
-	if len(problems) > 0 {
-		return Config{}, errors.New("invalid configuration:\n  - " + strings.Join(problems, "\n  - "))
+	if len(l.problems) > 0 {
+		return Config{}, errors.New("invalid configuration:\n  - " + strings.Join(l.problems, "\n  - "))
 	}
 	return c, nil
+}
+
+// splitList splits a comma-separated list, trimming each item and dropping the empty ones.
+func splitList(s string) []string {
+	var out []string
+	for _, item := range strings.Split(s, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }
 
 // An X handle is 1 to 15 letters, digits or underscores.
@@ -334,70 +337,45 @@ var xUsername = regexp.MustCompile(`^[A-Za-z0-9_]{1,15}$`)
 var RelayKinds = []string{"post", "reply", "quote", "repost"}
 
 // loadX reads the X settings. The token is never repeated in an error message.
-func loadX(get func(string) string, problems *[]string) X {
-	x := X{BearerToken: get("X_BEARER_TOKEN"), Username: defaultXUsername, MonthlyCap: defaultXMonthlyCap, FanLookupCap: defaultXFanLookupCap}
+func loadX(l *loader) X {
+	x := X{BearerToken: l.get("X_BEARER_TOKEN"), Username: defaultXUsername}
 
-	if v := strings.TrimPrefix(get("X_USERNAME"), "@"); v != "" {
+	if v := strings.TrimPrefix(l.get("X_USERNAME"), "@"); v != "" {
 		if !xUsername.MatchString(v) {
-			*problems = append(*problems, "X_USERNAME must be an X handle (letters, digits and _, up to 15), got "+quote(v))
+			l.problem("X_USERNAME must be an X handle (letters, digits and _, up to 15), got " + quote(v))
 		} else {
 			x.Username = v
 		}
 	}
 
-	secs := defaultXPollSeconds
-	if v := get("X_POLL_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minXPollSeconds {
-			*problems = append(*problems, "X_POLL_SECONDS must be a whole number of "+strconv.Itoa(minXPollSeconds)+" or more, got "+quote(v))
-		} else {
-			secs = n
-		}
-	}
-	x.PollEvery = time.Duration(secs) * time.Second
-
-	if v := get("X_MONTHLY_READ_CAP"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minXMonthlyCap {
-			*problems = append(*problems, "X_MONTHLY_READ_CAP must be a whole number of "+strconv.Itoa(minXMonthlyCap)+" or more, got "+quote(v))
-		} else {
-			x.MonthlyCap = n
-		}
-	}
-
-	if v := get("X_FAN_LOOKUP_CAP"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < 0 {
-			*problems = append(*problems, "X_FAN_LOOKUP_CAP must be a whole number, 0 or more, got "+quote(v))
-		} else {
-			x.FanLookupCap = n
-		}
-	}
+	x.PollEvery = l.seconds("X_POLL_SECONDS", defaultXPollSeconds, minXPollSeconds)
+	x.MonthlyCap = l.number("X_MONTHLY_READ_CAP", defaultXMonthlyCap, minXMonthlyCap, " of "+strconv.Itoa(minXMonthlyCap)+" or more")
+	x.FanLookupCap = l.number("X_FAN_LOOKUP_CAP", defaultXFanLookupCap, 0, ", 0 or more")
 
 	x.Style = "card"
-	if v := strings.ToLower(get("TWEET_STYLE")); v != "" {
+	if v := strings.ToLower(l.get("TWEET_STYLE")); v != "" {
 		if v != "card" && v != "link" {
-			*problems = append(*problems, "TWEET_STYLE must be card or link, got "+quote(v))
+			l.problem("TWEET_STYLE must be card or link, got " + quote(v))
 		} else {
 			x.Style = v
 		}
 	}
 
 	x.Kinds = RelayKinds
-	if v := get("X_RELAY_TYPES"); v != "" {
+	if v := l.get("X_RELAY_TYPES"); v != "" {
 		x.Kinds = nil
-		for _, k := range strings.Split(v, ",") {
-			k = strings.ToLower(strings.TrimSpace(k))
+		unknown := false
+		for _, k := range splitList(strings.ToLower(v)) {
 			switch {
-			case k == "":
 			case !slices.Contains(RelayKinds, k):
-				*problems = append(*problems, "X_RELAY_TYPES has an unknown type "+quote(k)+" (use post, reply, quote, repost)")
+				l.problem("X_RELAY_TYPES has an unknown type " + quote(k) + " (use post, reply, quote, repost)")
+				unknown = true
 			case !slices.Contains(x.Kinds, k):
 				x.Kinds = append(x.Kinds, k)
 			}
 		}
-		if len(x.Kinds) == 0 && len(*problems) == 0 {
-			*problems = append(*problems, "X_RELAY_TYPES is empty; list at least one of post, reply, quote, repost")
+		if len(x.Kinds) == 0 && !unknown {
+			l.problem("X_RELAY_TYPES is empty; list at least one of post, reply, quote, repost")
 		}
 	}
 	return x
@@ -407,19 +385,40 @@ func loadX(get func(string) string, problems *[]string) X {
 var languageName = regexp.MustCompile(`^[A-Za-z][A-Za-z -]{1,39}$`)
 
 // loadTranslate reads the translation settings. The key is never repeated in an error message.
-func loadTranslate(get func(string) string, problems *[]string) Translate {
-	t := Translate{APIKey: get("GEMINI_API_KEY"), Model: get("GEMINI_MODEL"), To: defaultTranslateTo}
-	if v := get("TRANSLATE_TO"); v != "" {
+func loadTranslate(l *loader) Translate {
+	t := Translate{APIKey: l.get("GEMINI_API_KEY"), Model: l.get("GEMINI_MODEL"), To: defaultTranslateTo}
+	if v := l.get("TRANSLATE_TO"); v != "" {
 		if !languageName.MatchString(v) {
-			*problems = append(*problems, "TRANSLATE_TO must be a language named in English, such as Indonesian or English, got "+quote(v))
+			l.problem("TRANSLATE_TO must be a language named in English, such as Indonesian or English, got " + quote(v))
 		} else {
 			t.To = v
 		}
 	}
 	if t.APIKey != "" && t.Model == "" {
-		*problems = append(*problems, "GEMINI_MODEL is empty: with GEMINI_API_KEY set, name the model to use (the same model name Renbun uses is fine)")
+		l.problem("GEMINI_MODEL is empty: with GEMINI_API_KEY set, name the model to use")
 	}
 	return t
+}
+
+// loadCommunity reads the community channel's settings. The ID and the name go together: one without the other is a mistake, not "off".
+func loadCommunity(l *loader) Community {
+	var c Community
+	id, name := l.get("COMMUNITY_YOUTUBE_CHANNEL_ID"), l.get("COMMUNITY_NAME")
+	switch {
+	case id == "" && name == "":
+		// off
+	case id == "" || name == "":
+		l.problem("COMMUNITY_YOUTUBE_CHANNEL_ID and COMMUNITY_NAME go together: set both or neither")
+	case !youtubeChannelID.MatchString(id):
+		l.problem("COMMUNITY_YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got " + quote(id))
+	default:
+		c.ChannelID, c.Name = id, name
+	}
+	c.PollEvery = l.seconds("COMMUNITY_POLL_SECONDS", defaultCommunityPollSeconds, minPollSeconds)
+	c.File = l.path("COMMUNITY_FILE", defaultCommunityFile)
+	c.Channel = l.id("CHANNEL_COMMUNITY", "")
+	c.Role = l.id("ROLE_PING_COMMUNITY", "")
+	return c
 }
 
 func quote(s string) string {
@@ -427,37 +426,4 @@ func quote(s string) string {
 		return "nothing"
 	}
 	return strconv.Quote(s)
-}
-
-// loadCommunity reads the community channel's settings. The ID and the name go together: one without the other is a mistake, not "off".
-func loadCommunity(get func(string) string, problems *[]string) Community {
-	var c Community
-	id, name := get("COMMUNITY_YOUTUBE_CHANNEL_ID"), get("COMMUNITY_NAME")
-	switch {
-	case id == "" && name == "":
-		// off
-	case id == "" || name == "":
-		*problems = append(*problems, "COMMUNITY_YOUTUBE_CHANNEL_ID and COMMUNITY_NAME go together: set both or neither")
-	case !youtubeChannelID.MatchString(id):
-		*problems = append(*problems, "COMMUNITY_YOUTUBE_CHANNEL_ID must look like UC followed by 22 characters, got "+quote(id))
-	default:
-		c.ChannelID, c.Name = id, name
-	}
-
-	secs := defaultCommunityPollSeconds
-	if v := get("COMMUNITY_POLL_SECONDS"); v != "" {
-		n, err := strconv.Atoi(v)
-		if err != nil || n < minPollSeconds {
-			*problems = append(*problems, "COMMUNITY_POLL_SECONDS must be a whole number of "+strconv.Itoa(minPollSeconds)+" or more, got "+quote(v))
-		} else {
-			secs = n
-		}
-	}
-	c.PollEvery = time.Duration(secs) * time.Second
-
-	c.File = get("COMMUNITY_FILE")
-	if c.File == "" {
-		c.File = defaultCommunityFile
-	}
-	return c
 }

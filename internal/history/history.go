@@ -12,29 +12,42 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Nadif243/fancord-bot/internal/atomicfile"
 	"github.com/Nadif243/fancord-bot/internal/broadcast"
 )
 
 const formatVersion = 1
+
+// How a stream's state and kind are written in the file.
+const (
+	stateUpcoming = "upcoming"
+	stateLive     = "live"
+	stateEnded    = "ended"
+
+	kindStream   = "" // the empty kind is a live stream, as in every entry from before kinds were kept
+	kindPremiere = "premiere"
+	kindVideo    = "video"
+	kindShort    = "short"
+)
 
 // Entry is one stream as it looked the last time we saw it.
 type Entry struct {
 	VideoID string    `json:"videoId"`
 	Title   string    `json:"title"`
 	State   string    `json:"state"` // "upcoming", "live" or "ended"
-	Start   time.Time `json:"start"` // zero when unknown
+	Start   time.Time `json:"start"` // zero when unknown; for a video or Short, when it was published
 	End     time.Time `json:"end"`   // zero until it has ended
 
-	// Kind is "" for a live stream (every entry from before this field was/ kept is one), or "premiere", "video" or "short". Only streams count for the recap, the nickname questions and /collab; the rest is kept so the history says everything the bot announced.
+	// Kind is "" for a live stream, or "premiere", "video" or "short". Only streams count for the recap, the nickname questions and /collab; the rest is kept so the history says everything the bot announced.
 	Kind string `json:"kind,omitempty"`
 }
 
 // IsStream says the entry is a live stream.
-func (e Entry) IsStream() bool { return e.Kind == "" }
+func (e Entry) IsStream() bool { return e.Kind == kindStream }
 
 // Duration is how long the stream ran, or 0 when we do not know.
 func (e Entry) Duration() time.Duration {
-	if e.State != "ended" || e.Start.IsZero() || e.End.IsZero() || e.End.Before(e.Start) {
+	if e.State != stateEnded || e.Start.IsZero() || e.End.IsZero() || e.End.Before(e.Start) {
 		return 0
 	}
 	return e.End.Sub(e.Start)
@@ -55,6 +68,11 @@ type File struct {
 // Open reads the file, creating it on first run. A file that cannot be understood is an error: carrying on with an empty history would quietly lose the data the recaps depend on.
 func Open(path string) (*File, error) {
 	f := &File{path: path, data: fileData{Version: formatVersion, Streams: map[string]Entry{}}}
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("cannot create the folder for %s: %w", path, err)
+		}
+	}
 
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
@@ -84,28 +102,30 @@ func (f *File) Record(s broadcast.Stream) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	e := Entry{VideoID: s.VideoID, Title: s.Title, State: stateName(s.State), Start: s.StartAt.UTC(), End: s.EndAt.UTC(), Kind: kindName(s.Kind)}
-	if s.StartAt.IsZero() {
-		e.Start = time.Time{}
+	e := Entry{
+		VideoID: s.VideoID, Title: s.Title, State: stateName(s.State),
+		Start: s.StartAt.UTC(), End: s.EndAt.UTC(), Kind: kindName(s.Kind),
 	}
-	if s.EndAt.IsZero() {
-		e.End = time.Time{}
-	}
-
 	if old, ok := f.data.Streams[s.VideoID]; ok {
 		if stateRank(e.State) < stateRank(old.State) {
 			return nil
 		}
 		// A stream that has just ended may not be on the Live tab yet and look like a premiere for a while. Once it was seen as a stream it stays one, or it would fall out of the recap.
-		if old.IsStream() && e.Kind == "premiere" {
-			e.Kind = ""
+		if old.IsStream() && e.Kind == kindPremiere {
+			e.Kind = kindStream
 		}
-		if old == e {
+		if old.same(e) {
 			return nil
 		}
 	}
 	f.data.Streams[s.VideoID] = e
 	return f.save()
+}
+
+// same says two entries hold the same facts. Times are compared with Equal, not ==, which would also compare the time zone and clock readings inside them.
+func (e Entry) same(o Entry) bool {
+	return e.VideoID == o.VideoID && e.Title == o.Title && e.State == o.State && e.Kind == o.Kind &&
+		e.Start.Equal(o.Start) && e.End.Equal(o.End)
 }
 
 // Ended returns the streams that finished in [from, to), oldest first.
@@ -117,7 +137,7 @@ func (f *File) Ended(from, to time.Time) []Entry {
 	var out []Entry
 	for _, e := range f.data.Streams {
 		at := e.finishedAt()
-		if e.IsStream() && e.State == "ended" && !at.IsZero() && !at.Before(from) && at.Before(to) {
+		if e.IsStream() && e.State == stateEnded && !at.IsZero() && !at.Before(from) && at.Before(to) {
 			out = append(out, e)
 		}
 	}
@@ -135,7 +155,7 @@ func (f *File) Week(from, to, carry time.Time) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if !e.IsStream() || e.State != "ended" {
+		if !e.IsStream() || e.State != stateEnded {
 			continue
 		}
 		start, end := e.startedAt(), e.finishedAt()
@@ -166,7 +186,7 @@ func (f *File) Running(since, before time.Time) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.IsStream() && e.State == "live" && !e.Start.IsZero() && !e.Start.Before(since) && e.Start.Before(before) {
+		if e.IsStream() && e.State == stateLive && !e.Start.IsZero() && !e.Start.Before(since) && e.Start.Before(before) {
 			out = append(out, e)
 		}
 	}
@@ -189,7 +209,7 @@ func (f *File) Recent(n int) []Entry {
 
 	var out []Entry
 	for _, e := range f.data.Streams {
-		if e.IsStream() && e.State != "upcoming" {
+		if e.IsStream() && e.State != stateUpcoming {
 			out = append(out, e)
 		}
 	}
@@ -225,69 +245,45 @@ func (e Entry) finishedAt() time.Time {
 func kindName(k broadcast.Kind) string {
 	switch k {
 	case broadcast.KindPremiere:
-		return "premiere"
+		return kindPremiere
 	case broadcast.KindVideo:
-		return "video"
+		return kindVideo
 	case broadcast.KindShort:
-		return "short"
+		return kindShort
 	default:
-		return ""
+		return kindStream
 	}
 }
 
 func stateName(s broadcast.State) string {
 	switch s {
 	case broadcast.Upcoming:
-		return "upcoming"
+		return stateUpcoming
 	case broadcast.Live:
-		return "live"
+		return stateLive
 	default:
-		return "ended"
+		return stateEnded
 	}
 }
 
 func stateRank(name string) int {
 	switch name {
-	case "upcoming":
+	case stateUpcoming:
 		return 1
-	case "live":
+	case stateLive:
 		return 2
 	default:
 		return 3
 	}
 }
 
-// save writes a temporary file and renames it over the real one, so a crash never leaves half a file.
+// save rewrites the whole file (atomicfile writes a temporary file and renames it, so a crash never leaves half a file.
 func (f *File) save() error {
 	raw, err := json.MarshalIndent(f.data, "", "  ")
 	if err != nil {
 		return fmt.Errorf("encode history: %w", err)
 	}
-	dir := filepath.Dir(f.path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create %s: %w", dir, err)
-	}
-	tmp, err := os.CreateTemp(dir, ".history-*.tmp")
-	if err != nil {
-		return fmt.Errorf("save history: %w", err)
-	}
-	cleanup := func() { _ = os.Remove(tmp.Name()) }
-	if _, err := tmp.Write(raw); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("save history: %w", err)
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		cleanup()
-		return fmt.Errorf("save history: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		cleanup()
-		return fmt.Errorf("save history: %w", err)
-	}
-	if err := os.Rename(tmp.Name(), f.path); err != nil {
-		cleanup()
+	if err := atomicfile.Write(f.path, raw); err != nil {
 		return fmt.Errorf("save history: %w", err)
 	}
 	return nil

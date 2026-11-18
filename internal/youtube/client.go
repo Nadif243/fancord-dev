@@ -1,4 +1,4 @@
-// Package youtube reads a channel's recent streams from the YouTube Data API.
+// Package youtube reads a channel's recent streams, premieres and uploads from the YouTube Data API.
 package youtube
 
 import (
@@ -58,7 +58,7 @@ func (c *Client) RecentStreams(ctx context.Context, channelID string, pages int)
 	return c.scan(ctx, channelID, pages, false)
 }
 
-// RecentActivity is RecentStreams plus the ordinary uploads: each one comes back as a Stream of Kind KindVideo, or KindShort when it is on the channel's Shorts list, whose StartAt is when it was published. It costs one more quota unit per check (the Shorts list).
+// RecentActivity is RecentStreams plus the ordinary uploads: each one comes back as a Stream of Kind KindVideo, or KindShort when it is on the channel's Shorts list, whose StartAt is when it was published. It costs one more quota unit per page (the Shorts list).
 func (c *Client) RecentActivity(ctx context.Context, channelID string, pages int) (broadcast.Scan, error) {
 	return c.scan(ctx, channelID, pages, true)
 }
@@ -83,15 +83,19 @@ func (c *Client) scan(ctx context.Context, channelID string, pages int, uploads 
 		return broadcast.Scan{}, err
 	}
 
-	// "UUSH" is the channel's Shorts list. Without it (a failed read) every upload is called a video, which is only a wrong word, not a missed one.
+	// "UUSH" is the channel's Shorts list. Without it (a failed read) every upload is called a video, which is only a wrong word, not a missed one, so the scan goes on and says so in its notes.
+	var scan broadcast.Scan
 	var shorts map[string]bool
 	if uploads {
 		if shorts, err = c.videoIDs(ctx, "UUSH"+rest, pages); err != nil {
+			if ctx.Err() != nil {
+				return broadcast.Scan{}, err // shutting down or too slow: not a Shorts problem
+			}
 			shorts = nil
+			scan.Notes = append(scan.Notes, "The Shorts list could not be read, so Shorts are announced as videos ("+err.Error()+").")
 		}
 	}
 
-	var scan broadcast.Scan
 	pageToken := ""
 	for page := 0; page < pages; page++ {
 		ids, next, err := c.playlistPage(ctx, "UU"+rest, pageToken)
@@ -189,7 +193,27 @@ type Video struct {
 
 // Videos looks up videos by ID, on any channel, 50 at a time, for 1 quota unit per 50. A video that is private, deleted or does not exist is simply not in the answer.
 func (c *Client) Videos(ctx context.Context, ids []string) (map[string]Video, error) {
-	out := make(map[string]Video, len(ids))
+	found, err := c.fetchVideos(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]Video, len(found))
+	for _, v := range found {
+		info := Video{
+			ID: v.ID, Title: v.Snippet.Title, Description: v.Snippet.Description,
+			ChannelID: v.Snippet.ChannelID, ChannelTitle: v.Snippet.ChannelTitle,
+		}
+		if st, isStream := toStream(v, nil); isStream {
+			info.State, info.Kind, info.Start, info.End = st.State, st.Kind, st.StartAt, st.EndAt
+		}
+		out[v.ID] = info
+	}
+	return out, nil
+}
+
+// fetchVideos asks for the details of these videos, 50 per call. YouTube may answer in any order and leaves out videos it cannot show.
+func (c *Client) fetchVideos(ctx context.Context, ids []string) ([]apiVideo, error) {
+	var out []apiVideo
 	for len(ids) > 0 {
 		batch := ids[:min(len(ids), pageSize)]
 		ids = ids[len(batch):]
@@ -202,50 +226,39 @@ func (c *Client) Videos(ctx context.Context, ids []string) (map[string]Video, er
 		if err != nil {
 			return nil, err
 		}
-		for _, v := range details.Items {
-			info := Video{
-				ID: v.ID, Title: v.Snippet.Title, Description: v.Snippet.Description,
-				ChannelID: v.Snippet.ChannelID, ChannelTitle: v.Snippet.ChannelTitle,
-			}
-			if st, isStream := toStream(v, nil); isStream {
-				info.State, info.Kind, info.Start, info.End = st.State, st.Kind, st.StartAt, st.EndAt
-			}
-			out[v.ID] = info
-		}
+		out = append(out, details.Items...)
 	}
 	return out, nil
 }
 
-// streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids. Only those carry liveStreamingDetails, which is how we tell them from ordinary uploads.
+// streamsAmong asks for the details of these videos (up to 50 at once) and keeps the streams and premieres, in the order of ids; with uploads set, the ordinary uploads too. Only streams and premieres carry liveStreamingDetails, which is how we tell them from ordinary uploads.
 func (c *Client) streamsAmong(ctx context.Context, ids []string, liveTab map[string]bool, uploads bool, shorts map[string]bool) ([]broadcast.Stream, error) {
-	var details videosResponse
-	err := c.get(ctx, "videos", url.Values{
-		"part": {"snippet,liveStreamingDetails,contentDetails"},
-		"id":   {strings.Join(ids, ",")},
-	}, &details)
+	found, err := c.fetchVideos(ctx, ids)
 	if err != nil {
 		return nil, err
 	}
-	byID := make(map[string]video, len(details.Items))
-	for _, v := range details.Items {
+	byID := make(map[string]apiVideo, len(found))
+	for _, v := range found {
 		byID[v.ID] = v
 	}
 
 	var streams []broadcast.Stream
-	for _, id := range ids { // YouTube may reorder its answer, so walk our own order
-		if v, ok := byID[id]; ok {
-			if st, isStream := toStream(v, liveTab); isStream {
-				streams = append(streams, st)
-			} else if uploads && v.LiveStreamingDetails == nil {
-				streams = append(streams, toUpload(v, shorts))
-			}
+	for _, id := range ids { // walk our own order, not YouTube's
+		v, ok := byID[id]
+		if !ok {
+			continue
+		}
+		if st, isStream := toStream(v, liveTab); isStream {
+			streams = append(streams, st)
+		} else if uploads && v.LiveStreamingDetails == nil {
+			streams = append(streams, toUpload(v, shorts))
 		}
 	}
 	return streams, nil
 }
 
 // toStream turns YouTube's video record into our own Stream. The second result is false for ordinary uploads and for states we do not understand.
-func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
+func toStream(v apiVideo, liveTab map[string]bool) (broadcast.Stream, bool) {
 	d := v.LiveStreamingDetails
 	if d == nil {
 		return broadcast.Stream{}, false
@@ -271,7 +284,7 @@ func toStream(v video, liveTab map[string]bool) (broadcast.Stream, bool) {
 }
 
 // toUpload turns an ordinary upload into a Stream. It has no live state; the published time (zero when YouTube did not give one) is what the poller uses to tell a new video from an old one.
-func toUpload(v video, shorts map[string]bool) broadcast.Stream {
+func toUpload(v apiVideo, shorts map[string]bool) broadcast.Stream {
 	kind := broadcast.KindVideo
 	if shorts[v.ID] {
 		kind = broadcast.KindShort
@@ -423,10 +436,11 @@ type playlistItemsResponse struct {
 }
 
 type videosResponse struct {
-	Items []video `json:"items"`
+	Items []apiVideo `json:"items"`
 }
 
-type video struct {
+// apiVideo is one video as YouTube describes it (Video, above, is what we keep).
+type apiVideo struct {
 	ID      string `json:"id"`
 	Snippet struct {
 		Title        string `json:"title"`

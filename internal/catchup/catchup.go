@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/msg"
 )
@@ -53,8 +54,7 @@ type Reporter struct {
 	streams Streams
 	ann     Announcements
 	send    Sender
-	opsID   string
-	opsFn   func() string // when set, asked each time instead of opsID
+	opsFn   func() string // where the note goes, asked each time
 	log     *slog.Logger
 	now     func() time.Time
 
@@ -72,9 +72,10 @@ func (r *Reporter) WithOps(ops func() string) *Reporter {
 // New makes a Reporter. opsID is the channel for the note; empty means the note is only logged.
 func New(marker Marker, streams Streams, ann Announcements, send Sender, opsID string, log *slog.Logger) *Reporter {
 	return &Reporter{
-		marker: marker, streams: streams, ann: ann, send: send, opsID: opsID, log: log,
-		now:  time.Now,
-		prev: marker.LastAlive(),
+		marker: marker, streams: streams, ann: ann, send: send, log: log,
+		opsFn: func() string { return opsID },
+		now:   time.Now,
+		prev:  marker.LastAlive(),
 	}
 }
 
@@ -121,14 +122,11 @@ func (r *Reporter) report() {
 		if !announced {
 			notAnnounced++
 		}
-		missed = append(missed, msg.MissedStream{Stream: stream(e), Announced: announced})
+		missed = append(missed, msg.MissedStream{Stream: recapStream(e), Announced: announced})
 	}
 	r.log.Info("back online", "off_for", gap.Round(time.Second).String(), "ended_meanwhile", len(missed), "not_announced", notAnnounced)
 
-	opsID := r.opsID
-	if r.opsFn != nil {
-		opsID = r.opsFn()
-	}
+	opsID := r.opsFn()
 	if opsID == "" || (len(missed) == 0 && gap < reportGap) {
 		return // a quick restart (an update, say) is not worth a message
 	}
@@ -140,15 +138,15 @@ func (r *Reporter) report() {
 	}
 }
 
-// stream describes a history entry for a message.
-func stream(e history.Entry) msg.RecapStream {
+// recapStream describes a history entry for a message.
+func recapStream(e history.Entry) msg.RecapStream {
 	start := e.Start
 	if start.IsZero() {
 		start = e.End
 	}
 	return msg.RecapStream{
 		Title:    e.Title,
-		URL:      "https://www.youtube.com/watch?v=" + e.VideoID,
+		URL:      broadcast.WatchURL(e.VideoID),
 		Start:    start,
 		Duration: e.Duration(),
 	}

@@ -10,7 +10,7 @@ func Seed() []Category {
 	const (
 		dove       = "\U0001F54A️"
 		controller = "\U0001F3AE"
-		crescnt    = "☪️"
+		crescent   = "☪️"
 		cook       = "\U0001F9D1‍\U0001F373"
 	)
 	return []Category{
@@ -34,7 +34,7 @@ func Seed() []Category {
 			{ID: "1382633877184446615", Name: "DnD Yuuraid", Emoji: "🧙", Desc: "Agenda DnD"},
 			{ID: "1426488949366587424", Name: "Yuunobar", Emoji: "🍿", Desc: "Agenda nobar bareng"},
 			{ID: "1386242875737505802", Name: "Ahli literatur", Emoji: "📜", Desc: "Biar gk minim literasi"},
-			{ID: "1473321753060048956", Name: "YuuKhatam", Emoji: crescnt, Desc: "Bismillah berkah"},
+			{ID: "1473321753060048956", Name: "YuuKhatam", Emoji: crescent, Desc: "Bismillah berkah"},
 		}},
 		{Key: "information", Name: "Information", Title: DefaultTitle("Information"), Roles: []Role{
 			{ID: "1568875003481563198", Name: "Youtube Pings", Emoji: "🔔", Desc: "Absen stream"},

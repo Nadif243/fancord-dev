@@ -73,13 +73,6 @@ func (f *File) Add(actor, target string) (int, error) {
 	return row[target], f.save()
 }
 
-// Count returns how many times actor has rodok-ed target so far.
-func (f *File) Count(actor, target string) int {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	return f.data.Counts[actor][target]
-}
-
 func (f *File) save() error {
 	raw, err := json.MarshalIndent(f.data, "", "  ")
 	if err != nil {

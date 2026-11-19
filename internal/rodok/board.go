@@ -1,6 +1,9 @@
 package rodok
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+)
 
 // Role is which side of a rodok a leaderboard is about.
 type Role int
@@ -57,19 +60,13 @@ func (f *File) ranked(role Role) []Entry {
 	for id, t := range sums {
 		out = append(out, Entry{ID: id, Total: t.total, People: t.people})
 	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i], out[j]
-		if a.Total != b.Total {
-			return a.Total > b.Total
-		}
-		if a.People != b.People {
-			return a.People > b.People
-		}
-		return a.ID < b.ID
+	slices.SortFunc(out, func(a, b Entry) int {
+		return cmp.Or(cmp.Compare(b.Total, a.Total), cmp.Compare(b.People, a.People), cmp.Compare(a.ID, b.ID))
 	})
 	return out
 }
 
+// Top, Rank and Total answer the questions of Board from the counts.
 func (f *File) Top(role Role, n int) []Entry {
 	f.mu.Lock()
 	defer f.mu.Unlock()

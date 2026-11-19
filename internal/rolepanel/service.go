@@ -3,6 +3,7 @@ package rolepanel
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 
@@ -56,6 +57,7 @@ type Service struct {
 	pub    sync.Mutex // one publish at a time
 }
 
+// New joins the stored groups with the way to post them and the server they are for.
 func New(store *Store, poster Poster, guild Guild) *Service {
 	return &Service{store: store, poster: poster, guild: guild}
 }
@@ -64,6 +66,7 @@ func New(store *Store, poster Poster, guild Guild) *Service {
 func (s *Service) Categories() []Category { return s.store.Categories() }
 func (s *Service) Channel() string        { return s.store.Channel() }
 
+// SetCategory, SetRole and RemoveRole change the stored setup; see Store.
 func (s *Service) SetCategory(name string, one bool, title string) (bool, Category, error) {
 	return s.store.SetCategory(name, one, title)
 }
@@ -109,14 +112,14 @@ func (s *Service) Press(roleID string, has []string) (Action, error) {
 	if !ok {
 		return Action{}, ErrGone
 	}
-	if contains(has, roleID) {
+	if slices.Contains(has, roleID) {
 		return Action{Remove: []string{roleID}, Text: msg.RoleLost(r.Name)}, nil
 	}
 	a := Action{Add: []string{roleID}}
 	var dropped []string
 	if c.One {
 		for _, other := range c.Roles {
-			if other.ID != roleID && contains(has, other.ID) {
+			if other.ID != roleID && slices.Contains(has, other.ID) {
 				a.Remove = append(a.Remove, other.ID)
 				dropped = append(dropped, other.Name)
 			}
@@ -124,15 +127,6 @@ func (s *Service) Press(roleID string, has []string) (Action, error) {
 	}
 	a.Text = msg.RoleGot(r.Name, dropped)
 	return a, nil
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 // ErrNoChannel: nowhere to post yet.

@@ -57,6 +57,7 @@ type Service struct {
 	users map[string]*usage
 }
 
+// New makes a Service that keeps its totals in counts.
 func New(counts Counter) *Service {
 	return &Service{counts: counts, now: time.Now, users: map[string]*usage{}}
 }

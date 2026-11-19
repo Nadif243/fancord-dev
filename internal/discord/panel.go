@@ -4,6 +4,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
+	"strings"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -70,7 +72,7 @@ func (a PanelAdapter) EditPanel(channelID, messageID string, v rolepanel.View) e
 		AllowedMentions: nobody(),
 	})
 	if isGone(err) {
-		return fmt.Errorf("%w: %v", rolepanel.ErrGone, err)
+		return fmt.Errorf("%w: %w", rolepanel.ErrGone, err)
 	}
 	return err
 }
@@ -107,20 +109,16 @@ func panelEmbed(v rolepanel.View) *discordgo.MessageEmbed {
 // panelRows lays the buttons out five to a row.
 func panelRows(v rolepanel.View) []discordgo.MessageComponent {
 	var rows []discordgo.MessageComponent
-	var row discordgo.ActionsRow
-	for _, b := range v.Buttons {
-		row.Components = append(row.Components, discordgo.Button{
-			Label:    b.Label,
-			Style:    discordgo.SecondaryButton,
-			CustomID: b.CustomID,
-			Emoji:    &discordgo.ComponentEmoji{Name: b.Emoji.Name, ID: b.Emoji.ID, Animated: b.Emoji.Animated},
-		})
-		if len(row.Components) == 5 {
-			rows = append(rows, row)
-			row = discordgo.ActionsRow{}
+	for five := range slices.Chunk(v.Buttons, 5) {
+		var row discordgo.ActionsRow
+		for _, b := range five {
+			row.Components = append(row.Components, discordgo.Button{
+				Label:    b.Label,
+				Style:    discordgo.SecondaryButton,
+				CustomID: b.CustomID,
+				Emoji:    &discordgo.ComponentEmoji{Name: b.Emoji.Name, ID: b.Emoji.ID, Animated: b.Emoji.Animated},
+			})
 		}
-	}
-	if len(row.Components) > 0 {
 		rows = append(rows, row)
 	}
 	return rows
@@ -129,12 +127,7 @@ func panelRows(v rolepanel.View) []discordgo.MessageComponent {
 // onRole handles a press on a role button: the person gets the role, or loses it again. Only they see the answer.
 func (r *Router) onRole(s *discordgo.Session, i *discordgo.InteractionCreate, roleID string) {
 	log := r.log.With("button", "role", "role", roleID)
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Error("button panicked", "panic", rec)
-			_ = replyPrivate(s, i, msg.RoleFailed)
-		}
-	}()
+	defer recoverButton(s, i, log, msg.RoleFailed)
 	if r.deps.Roles == nil {
 		_ = replyPrivate(s, i, msg.RoleOff)
 		return
@@ -148,21 +141,12 @@ func (r *Router) onRole(s *discordgo.Session, i *discordgo.InteractionCreate, ro
 		_ = replyPrivate(s, i, msg.RoleUnavailable)
 		return
 	}
-	userID := i.Member.User.ID
-	// The new role first: if that fails nothing has changed.
-	for _, id := range act.Add {
-		if err = s.GuildMemberRoleAdd(i.GuildID, userID, id); err != nil {
-			break
-		}
-	}
-	if err == nil {
-		for _, id := range act.Remove {
-			if err = s.GuildMemberRoleRemove(i.GuildID, userID, id); err != nil {
-				break
-			}
-		}
-	}
 	if err != nil {
+		log.Error("could not work out the role change", "err", err)
+		_ = replyPrivate(s, i, msg.RoleFailed)
+		return
+	}
+	if err := changeRoles(s, i.GuildID, i.Member.User.ID, act); err != nil {
 		log.Error("could not change the roles", "err", err)
 		var rest *discordgo.RESTError
 		if errors.As(err, &rest) && rest.Response != nil && rest.Response.StatusCode == http.StatusForbidden {
@@ -173,6 +157,21 @@ func (r *Router) onRole(s *discordgo.Session, i *discordgo.InteractionCreate, ro
 		return
 	}
 	_ = replyPrivate(s, i, act.Text)
+}
+
+// changeRoles gives the new roles first and then takes the old ones away, and stops at the first error: if giving fails, nothing has changed.
+func changeRoles(s *discordgo.Session, guildID, userID string, act rolepanel.Action) error {
+	for _, id := range act.Add {
+		if err := s.GuildMemberRoleAdd(guildID, userID, id); err != nil {
+			return err
+		}
+	}
+	for _, id := range act.Remove {
+		if err := s.GuildMemberRoleRemove(guildID, userID, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addRolePanel registers /rolepanel: the staff command that sets up the panel.
@@ -245,7 +244,7 @@ func (r *Router) rolePanelChoices(i *discordgo.InteractionCreate) []*discordgo.A
 		typed := rolepanel.Key(opt.StringValue())
 		var out []*discordgo.ApplicationCommandOptionChoice
 		for _, c := range r.deps.Roles.Categories() {
-			if typed == "" || containsText(c.Key, typed) {
+			if typed == "" || strings.Contains(c.Key, typed) {
 				out = append(out, &discordgo.ApplicationCommandOptionChoice{Name: c.Name, Value: c.Key})
 			}
 		}
@@ -255,15 +254,6 @@ func (r *Router) rolePanelChoices(i *discordgo.InteractionCreate) []*discordgo.A
 		return out
 	}
 	return nil
-}
-
-func containsText(s, part string) bool {
-	for i := 0; i+len(part) <= len(s); i++ {
-		if s[i:i+len(part)] == part {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *Router) handleRolePanel(s *discordgo.Session, i *discordgo.InteractionCreate) error {
@@ -292,7 +282,7 @@ func (r *Router) handleRolePanel(s *discordgo.Session, i *discordgo.InteractionC
 		if err := deferPrivate(s, i); err != nil {
 			return err
 		}
-		return editReply(s, i, r.rolePanelPublish(s, i, optValue(sub.Options, "channel")))
+		return editReply(s, i, r.rolePanelPublish(i, optValue(sub.Options, "channel")))
 	}
 	return replyPrivate(s, i, msg.RolePanelBad)
 }
@@ -390,7 +380,7 @@ func (r *Router) rolePanelCategory(opts []*discordgo.ApplicationCommandInteracti
 }
 
 // rolePanelPublish posts or refreshes the panel and says what happened.
-func (r *Router) rolePanelPublish(s *discordgo.Session, i *discordgo.InteractionCreate, channelID string) string {
+func (r *Router) rolePanelPublish(i *discordgo.InteractionCreate, channelID string) string {
 	if channelID == "" {
 		channelID = r.deps.Roles.Channel()
 	}

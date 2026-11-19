@@ -398,7 +398,7 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 		return // not one of ours
 	}
 	log := r.log.With("button", action, "video", videoID)
-	defer recoverButton(s, i, log)
+	defer recoverButton(s, i, log, msg.CommandFailed)
 	if !r.guardReview(s, i, r.deps.Outside != nil) {
 		return
 	}
@@ -419,7 +419,7 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 // onWhich handles a press on a button under a "who is meant?" question. The people who may press are the same as for the review buttons.
 func (r *Router) onWhich(s *discordgo.Session, i *discordgo.InteractionCreate, key, choice string) {
 	log := r.log.With("button", "which", "question", key)
-	defer recoverButton(s, i, log)
+	defer recoverButton(s, i, log, msg.CommandFailed)
 	if !r.guardReview(s, i, r.deps.Which != nil) {
 		return
 	}
@@ -436,11 +436,11 @@ func (r *Router) onWhich(s *discordgo.Session, i *discordgo.InteractionCreate, k
 	}
 }
 
-// recoverButton is deferred by the button handlers: a bug in one must not take the whole bot down.
-func recoverButton(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
+// recoverButton is deferred by the button handlers: a bug in one must not take the whole bot down. failed is what the person is told.
+func recoverButton(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger, failed string) {
 	if rec := recover(); rec != nil {
 		log.Error("button panicked", "panic", rec)
-		_ = replyPrivate(s, i, msg.CommandFailed)
+		_ = replyPrivate(s, i, failed)
 	}
 }
 

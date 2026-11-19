@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -67,11 +66,6 @@ type Store struct {
 // OpenStore reads the file. When there is none it is created from seed (the groups the bot starts with). A file that cannot be understood is an error: carrying on with an empty one would lose the setup.
 func OpenStore(path string, seed []Category) (*Store, error) {
 	st := &Store{path: path, data: fileData{Version: formatVersion, Categories: cloneCategories(seed)}}
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("cannot create the folder for %s: %w", path, err)
-		}
-	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := st.save(); err != nil {
@@ -151,7 +145,7 @@ func DefaultTitle(name string) string {
 	words := strings.Fields(name)
 	for len(words) > 1 {
 		last := words[len(words)-1]
-		if _, err := fmt.Sscanf(last, "%d", new(int)); err != nil || strings.Trim(last, "0123456789") != "" {
+		if strings.Trim(last, "0123456789") != "" { // not a number
 			break
 		}
 		words = words[:len(words)-1]

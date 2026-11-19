@@ -82,60 +82,30 @@ func (f *File) Checked(videoID string) bool {
 	return f.data.Streams[videoID].Checked
 }
 
-// Check records that a person has looked at the stream. Saving happens only the first time.
-func (f *File) Check(videoID string) error {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	t := f.data.Streams[videoID]
-	if t.Checked {
-		return nil
-	}
-	t.Checked = true
-	f.data.Streams[videoID] = t
-	return f.save()
-}
-
 // Add records that these partners were in the stream. A partner who was removed earlier is back.
 func (f *File) Add(videoID string, names []string) error {
-	return f.change(videoID, names, func(t *tags, n string) bool {
-		changed := !slices.Contains(t.Added, n) || slices.Contains(t.Removed, n)
-		t.Added = appendOnce(t.Added, n)
-		t.Removed = slices.DeleteFunc(t.Removed, func(x string) bool { return x == n })
-		return changed
-	})
+	return f.Apply(videoID, names, nil, false)
 }
 
-// Remove records that these partners were not in the stream (even if the title names them). A partner who was added earlier is gone again.
-func (f *File) Remove(videoID string, names []string) error {
-	return f.change(videoID, names, func(t *tags, n string) bool {
-		changed := !slices.Contains(t.Removed, n) || slices.Contains(t.Added, n)
-		t.Removed = appendOnce(t.Removed, n)
-		t.Added = slices.DeleteFunc(t.Added, func(x string) bool { return x == n })
-		return changed
-	})
-}
-
-// change applies edit to every name and saves once, only if anything changed.
-// If saving fails the change is kept for this run, as in the other files.
-func (f *File) change(videoID string, names []string, edit func(*tags, string) bool) error {
+// Apply is what /collab does to one stream, in one step and with one save: partners are added, then partners are removed (so someone named in both ends up removed), and when check is true the stream is marked as looked at. A partner who was added earlier is gone again when removed, and one who was removed earlier is back when added. Nothing is saved when nothing changes. If saving fails the change is kept for this run, as in the other files.
+func (f *File) Apply(videoID string, add, remove []string, check bool) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	t := f.data.Streams[videoID]
-	changed := false
-	for _, n := range names {
-		if edit(&t, n) {
-			changed = true
-		}
+	before := f.data.Streams[videoID]
+	t := tags{Added: slices.Clone(before.Added), Removed: slices.Clone(before.Removed), Checked: before.Checked || check}
+	for _, n := range add {
+		t.Added = appendOnce(t.Added, n)
+		t.Removed = slices.DeleteFunc(t.Removed, func(x string) bool { return x == n })
 	}
-	if !changed {
+	for _, n := range remove {
+		t.Removed = appendOnce(t.Removed, n)
+		t.Added = slices.DeleteFunc(t.Added, func(x string) bool { return x == n })
+	}
+	if t.Checked == before.Checked && slices.Equal(t.Added, before.Added) && slices.Equal(t.Removed, before.Removed) {
 		return nil
 	}
-	if len(t.Added) == 0 && len(t.Removed) == 0 {
-		delete(f.data.Streams, videoID)
-	} else {
-		f.data.Streams[videoID] = t
-	}
+	f.data.Streams[videoID] = t
 	return f.save()
 }
 

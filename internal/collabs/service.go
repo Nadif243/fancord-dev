@@ -18,8 +18,6 @@ var (
 	ErrNoStream = errors.New("stream not found in the history")
 	// ErrUnknownNames: some typed names are not on the partner list. Nothing was changed; Outcome.Unknown lists them.
 	ErrUnknownNames = errors.New("some names are not on the partner list")
-	// ErrNothingNamed: no name was typed.
-	ErrNothingNamed = errors.New("no partner named")
 )
 
 // Streams is where streams are looked up. *history.File satisfies it.
@@ -67,11 +65,14 @@ type StreamRef struct {
 }
 
 func (s *Service) ref(e history.Entry) StreamRef {
-	start := e.Start
-	if start.IsZero() {
-		start = e.End
+	return StreamRef{
+		ID:       e.VideoID,
+		Title:    e.Title,
+		Start:    e.StartedAt(),
+		Live:     e.State == "live",
+		Partners: s.Partners(e.VideoID, e.Title),
+		Checked:  s.tags.Checked(e.VideoID),
 	}
-	return StreamRef{ID: e.VideoID, Title: e.Title, Start: start, Live: e.State == "live", Partners: s.Partners(e.VideoID, e.Title), Checked: s.tags.Checked(e.VideoID)}
 }
 
 // recentPool is how far back the search looks: well past a week of streams.
@@ -95,10 +96,9 @@ func (s *Service) Recent(query string, n int) []StreamRef {
 // Outcome is what a tagging command did.
 type Outcome struct {
 	Stream  StreamRef // the stream, with its partners after the change
-	Changed []string  // Add and Remove: the partners that were named
 	Unknown []string  // typed names that were not recognised (with ErrUnknownNames)
-	Added   []string  // Change: partners who are in the stream now but were not before
-	Removed []string  // Change: partners who were in the stream before but are not now
+	Added   []string  // partners who are in the stream now but were not before
+	Removed []string  // partners who were in the stream before but are not now
 }
 
 // Checked reports whether a person has confirmed who was in the stream.
@@ -121,7 +121,7 @@ func (s *Service) Suggest(typed string, n int) []partners.Suggestion {
 }
 
 // Change is the /collab command: it adds some people to a stream and takes some off, in one step, and marks the stream as checked. Both texts are checked first; if any name is not recognised nothing is changed. Someone named in both ends up removed.
-// With both texts empty it changes nothing and just reports the stream.
+// With both texts empty it only marks the stream as checked and reports it.
 func (s *Service) Change(videoID, add, remove string) (Outcome, error) {
 	e, ok := s.streams.Get(videoID)
 	if !ok {
@@ -137,13 +137,7 @@ func (s *Service) Change(videoID, add, remove string) (Outcome, error) {
 	defer s.mu.Unlock()
 	before := s.Partners(e.VideoID, e.Title)
 	// Any /collab on a stream, even with nothing added, means "I looked".
-	saveErr := s.tags.Check(videoID)
-	if len(toAdd) > 0 {
-		saveErr = errors.Join(saveErr, s.tags.Add(videoID, toAdd))
-	}
-	if len(toRemove) > 0 {
-		saveErr = errors.Join(saveErr, s.tags.Remove(videoID, toRemove))
-	}
+	saveErr := s.tags.Apply(videoID, toAdd, toRemove, true)
 	ref := s.ref(e)
 	out := Outcome{
 		Stream:  ref,
@@ -189,35 +183,4 @@ func VideoID(input string) string {
 		}
 	}
 	return in
-}
-
-// Add says these people were in the stream. who is typed text such as "dina, kocak": a team means all its members. Either everything is applied or, if a name is not recognised, nothing is.
-func (s *Service) Add(videoID, who string) (Outcome, error) {
-	return s.apply(videoID, who, s.tags.Add)
-}
-
-// Remove says these people were not in the stream.
-func (s *Service) Remove(videoID, who string) (Outcome, error) {
-	return s.apply(videoID, who, s.tags.Remove)
-}
-
-func (s *Service) apply(videoID, who string, write func(string, []string) error) (Outcome, error) {
-	e, ok := s.streams.Get(videoID)
-	if !ok {
-		return Outcome{}, ErrNoStream
-	}
-	names, unknown := s.book.Resolve(who)
-	switch {
-	case len(unknown) > 0:
-		return Outcome{Stream: s.ref(e), Unknown: unknown}, ErrUnknownNames
-	case len(names) == 0:
-		return Outcome{Stream: s.ref(e)}, ErrNothingNamed
-	}
-	err := write(videoID, names)
-	// Built after the write, so it shows the partners as they are now. (If only the saving failed, the change still holds until the bot restarts.)
-	out := Outcome{Stream: s.ref(e), Changed: names}
-	if err != nil {
-		return out, fmt.Errorf("save collab tags: %w", err)
-	}
-	return out, nil
 }

@@ -1,4 +1,6 @@
-// Package history keeps a record of every stream the bot has seen, in a JSON file. The weekly recap is built from it, so it never has to ask YouTube about the past.
+// Package history keeps a record of every stream the bot has seen, in a JSON
+// file. The weekly recap is built from it, so it never has to ask YouTube
+// about the past.
 package history
 
 import (
@@ -158,7 +160,7 @@ func (f *File) Week(from, to, carry time.Time) []Entry {
 		if !e.IsStream() || e.State != stateEnded {
 			continue
 		}
-		start, end := e.startedAt(), e.finishedAt()
+		start, end := e.StartedAt(), e.finishedAt()
 		if start.IsZero() {
 			continue
 		}
@@ -169,7 +171,7 @@ func (f *File) Week(from, to, carry time.Time) []Entry {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i].startedAt(), out[j].startedAt()
+		a, b := out[i].StartedAt(), out[j].StartedAt()
 		if !a.Equal(b) {
 			return a.Before(b)
 		}
@@ -214,7 +216,7 @@ func (f *File) Recent(n int) []Entry {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i].startedAt(), out[j].startedAt()
+		a, b := out[i].StartedAt(), out[j].StartedAt()
 		if !a.Equal(b) {
 			return a.After(b)
 		}
@@ -226,8 +228,9 @@ func (f *File) Recent(n int) []Entry {
 	return out
 }
 
-// startedAt is when the stream began, falling back to when it ended.
-func (e Entry) startedAt() time.Time {
+// StartedAt is when the stream began, falling back to when it ended.
+// (the recap, /collab and the nickname questions place a stream by it).
+func (e Entry) StartedAt() time.Time {
 	if !e.Start.IsZero() {
 		return e.Start
 	}

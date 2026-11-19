@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -20,8 +21,8 @@ import (
 )
 
 const (
-	defaultEvery  = 2 * time.Minute
-	defaultWindow = 8 * 24 * time.Hour // a bit more than the week the recap covers
+	scanEvery     = 2 * time.Minute
+	lookBack      = 8 * 24 * time.Hour // a bit more than the week the recap covers
 	pool          = 60                 // how many recent streams are looked at
 	maxPerScan    = 5                  // a first run after an update must not flood the channel
 	maxCandidates = 4                  // a row holds five buttons, and "Neither" is one of them
@@ -52,13 +53,6 @@ type Poster interface {
 	Post(channelID, content string, buttons []outside.Button) (messageID string, err error)
 }
 
-// Settings are the choices from the config.
-type Settings struct {
-	ChannelFn func() string // the review channel, asked each time (/setup can change it)
-	Every     time.Duration // how often to look; 0 means two minutes
-	Window    time.Duration // how far back; 0 means eight days
-}
-
 // Service asks the questions and takes the answers.
 type Service struct {
 	file    *File
@@ -66,19 +60,13 @@ type Service struct {
 	asker   Asker
 	tags    Tags
 	post    Poster
-	set     Settings
+	channel func() string // the review channel, asked each time (/setup can change it)
 	log     *slog.Logger
 	now     func() time.Time
 }
 
-func New(f *File, streams Streams, asker Asker, tags Tags, post Poster, set Settings, log *slog.Logger) *Service {
-	if set.Every <= 0 {
-		set.Every = defaultEvery
-	}
-	if set.Window <= 0 {
-		set.Window = defaultWindow
-	}
-	return &Service{file: f, streams: streams, asker: asker, tags: tags, post: post, set: set, log: log, now: time.Now}
+func New(f *File, streams Streams, asker Asker, tags Tags, post Poster, channel func() string, log *slog.Logger) *Service {
+	return &Service{file: f, streams: streams, asker: asker, tags: tags, post: post, channel: channel, log: log, now: time.Now}
 }
 
 // Run looks for questions to ask until ctx ends.
@@ -91,54 +79,56 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 			s.Scan()
-			timer.Reset(s.set.Every)
+			timer.Reset(scanEvery)
 		}
 	}
 }
 
-// Scan asks every question that is due: a recent stream whose title holds a shared nickname that nothing settles yet, that nobody has tagged by hand and that was not asked about before.
+// Scan asks every question that is due (see questions), at most maxPerScan at a time.
 func (s *Service) Scan() {
-	channel := ""
-	if s.set.ChannelFn != nil {
-		channel = s.set.ChannelFn()
-	}
+	channel := s.channel()
 	if channel == "" {
 		return
 	}
 	asked := 0
 	for _, e := range s.streams.Recent(pool) {
-		at := e.Start
-		if at.IsZero() {
-			at = e.End
-		}
-		if at.IsZero() || s.now().Sub(at) > s.set.Window {
-			continue
-		}
-		if s.tags.Checked(e.VideoID) {
-			continue // a person already went through this stream
-		}
-		added, removed := s.tags.Get(e.VideoID)
-		for _, a := range s.asker.Ambiguities(e.Title) {
-			if touches(a.Candidates, added) || touches(a.Candidates, removed) {
-				continue // somebody already tagged one of them by hand
-			}
-			if _, done := s.file.Find(e.VideoID, a.Word); done {
-				continue
-			}
-			if len(a.Candidates) > maxCandidates {
-				s.log.Warn("nickname shared by too many partners to ask about", "word", a.Word, "partners", len(a.Candidates))
-				continue
-			}
+		for _, it := range s.questions(e) {
 			if asked == maxPerScan {
 				return
 			}
-			it := Item{VideoID: e.VideoID, Title: e.Title, Start: at, Word: a.Word, Candidates: a.Candidates, Status: Open, Asked: s.now().UTC()}
 			if !s.ask(channel, it) {
 				return // the channel is unreachable; try again next time
 			}
 			asked++
 		}
 	}
+}
+
+// questions are the questions a stream still needs: one for every shared nickname in a recent stream's title that nothing settles yet, that nobody has tagged by hand and that was not asked about before.
+func (s *Service) questions(e history.Entry) []Item {
+	at := e.StartedAt()
+	if at.IsZero() || s.now().Sub(at) > lookBack {
+		return nil
+	}
+	if s.tags.Checked(e.VideoID) {
+		return nil // a person already went through this stream
+	}
+	added, removed := s.tags.Get(e.VideoID)
+	var out []Item
+	for _, a := range s.asker.Ambiguities(e.Title) {
+		if touches(a.Candidates, added) || touches(a.Candidates, removed) {
+			continue // somebody already tagged one of them by hand
+		}
+		if _, done := s.file.Find(e.VideoID, a.Word); done {
+			continue
+		}
+		if len(a.Candidates) > maxCandidates {
+			s.log.Warn("nickname shared by too many partners to ask about", "word", a.Word, "partners", len(a.Candidates))
+			continue
+		}
+		out = append(out, Item{VideoID: e.VideoID, Title: e.Title, Start: at, Word: a.Word, Candidates: a.Candidates, Status: Open, Asked: s.now().UTC()})
+	}
+	return out
 }
 
 // ask saves the question and posts it. It reports false when posting failed.
@@ -151,7 +141,9 @@ func (s *Service) ask(channel string, it Item) bool {
 	id, err := s.post.Post(channel, msg.WhichQuestion(view(saved)), Buttons(saved))
 	if err != nil {
 		s.log.Warn("nickname question: could not post, will try again", "video", it.VideoID, "word", it.Word, "err", err)
-		s.file.drop(saved.Key) // taken back, so the next scan asks again
+		if err := s.file.drop(saved.Key); err != nil { // taken back, so the next scan asks again
+			s.log.Warn("nickname question: could not save after taking it back", "err", err)
+		}
 		return false
 	}
 	if _, err := s.file.Update(saved.Key, func(x *Item) bool { x.MessageID = id; return true }); err != nil {
@@ -169,7 +161,6 @@ type Result struct {
 // Answer applies a button press: choice is a candidate's number, "all" or "none". Only the first answer counts; a second press gets the text of the first one back. The partners chosen are tagged on the stream.
 func (s *Service) Answer(key, choice, by string) (Result, error) {
 	changed := false
-	var chosen []string
 	it, err := s.file.Update(key, func(x *Item) bool {
 		if x.Status != Open {
 			return false
@@ -179,7 +170,7 @@ func (s *Service) Answer(key, choice, by string) (Result, error) {
 			return false
 		}
 		x.Status, x.Chosen, x.DecidedBy, x.Decided = Done, names, by, s.now().UTC()
-		chosen, changed = names, true
+		changed = true
 		return true
 	})
 	if errors.Is(err, ErrUnknown) {
@@ -188,8 +179,8 @@ func (s *Service) Answer(key, choice, by string) (Result, error) {
 	if it.Status != Done {
 		return Result{}, ErrBadChoice
 	}
-	if changed && len(chosen) > 0 {
-		if terr := s.tags.Add(it.VideoID, chosen); terr != nil {
+	if changed && len(it.Chosen) > 0 {
+		if terr := s.tags.Add(it.VideoID, it.Chosen); terr != nil {
 			err = errors.Join(err, terr)
 		}
 	}
@@ -202,7 +193,7 @@ func pick(candidates []string, choice string) (names []string, ok bool) {
 	case "none":
 		return nil, true
 	case "all":
-		return append([]string(nil), candidates...), true
+		return slices.Clone(candidates), true
 	}
 	n, err := strconv.Atoi(choice)
 	if err != nil || n < 0 || n >= len(candidates) {
@@ -217,14 +208,7 @@ func view(it Item) msg.WhichView {
 
 // touches reports whether the two lists share a name.
 func touches(a, b []string) bool {
-	for _, x := range a {
-		for _, y := range b {
-			if x == y {
-				return true
-			}
-		}
-	}
-	return false
+	return slices.ContainsFunc(a, func(x string) bool { return slices.Contains(b, x) })
 }
 
 // Buttons are the buttons under a question: one per partner, "Both" when there are two or three, and "Neither". The custom ID is "which:<key>:<choice>".

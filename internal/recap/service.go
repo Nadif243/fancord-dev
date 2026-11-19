@@ -53,20 +53,20 @@ const (
 )
 
 // Service posts the recap every Sunday evening.
+// Every channel is a function that is asked each time something is posted, so /setup can change it while the bot runs.
 type Service struct {
-	src       Source
-	send      Sender
-	marker    Marker
-	channelID string
-	settle    time.Duration // how long after the due time to wait before posting
-	log       *slog.Logger
-	now       func() time.Time
+	src     Source
+	send    Sender
+	marker  Marker
+	channel func() string // where the recap goes
+	settle  time.Duration // how long after the due time to wait before posting
+	log     *slog.Logger
+	now     func() time.Time
 
-	partners Matcher // nil: no collab line
-	opsID    string  // where the "unknown handles" note goes; empty: no note
+	partners Matcher       // nil: no collab line
+	ops      func() string // where the "unknown handles" note goes; nil: no note
 
-	remindID string         // where the Saturday reminder goes; empty: no reminder
-	live     liveChannels   // when set, asked each time instead of the fixed IDs above
+	remindTo func() string  // where the Saturday reminder goes; nil: no reminder
 	remarker ReminderMarker // remembers the last reminder handled
 	guests   Guests         // collabs on other channels; nil: the recap has none
 
@@ -74,14 +74,14 @@ type Service struct {
 }
 
 // New makes a Service. settle should be a little longer than the poll interval: the stream that ended just before the deadline has to be seen as ended by the poller before the recap counts it.
-func New(src Source, send Sender, marker Marker, channelID string, settle time.Duration, log *slog.Logger) *Service {
-	return &Service{src: src, send: send, marker: marker, channelID: channelID, settle: settle, log: log, now: time.Now}
+func New(src Source, send Sender, marker Marker, channel func() string, settle time.Duration, log *slog.Logger) *Service {
+	return &Service{src: src, send: send, marker: marker, channel: channel, settle: settle, log: log, now: time.Now}
 }
 
-// WithPartners turns on the collab line. A note about @handles that are not in the partner list is sent to opsChannelID after each weekly recap (and to the channel of a /devrecap preview). Either may be empty.
-func (s *Service) WithPartners(m Matcher, opsChannelID string) *Service {
+// WithPartners turns on the collab line. A note about @handles that are not in the partner list is sent to the ops channel after each weekly recap (and to the channel of a /devrecap preview). ops may be nil.
+func (s *Service) WithPartners(m Matcher, ops func() string) *Service {
 	s.partners = m
-	s.opsID = opsChannelID
+	s.ops = ops
 	return s
 }
 
@@ -91,36 +91,24 @@ func (s *Service) WithGuests(g Guests) *Service {
 	return s
 }
 
-// liveChannels are asked each time something is posted, so the channels can be changed while the bot runs. A nil one means "use the fixed ID".
-type liveChannels struct{ recap, ops, reminder func() string }
-
-// WithLiveChannels makes the recap, the note about unknown handles and the Saturday reminder ask where to post each time. The reminder only runs while it has a channel, as before.
-func (s *Service) WithLiveChannels(recap, ops, reminder func() string) *Service {
-	s.live = liveChannels{recap, ops, reminder}
-	return s
-}
-
-func (s *Service) recapChannel() string  { return pick(s.live.recap, s.channelID) }
-func (s *Service) opsChannel() string    { return pick(s.live.ops, s.opsID) }
-func (s *Service) remindChannel() string { return pick(s.live.reminder, s.remindID) }
-
-func pick(fn func() string, fixed string) string {
-	if fn != nil {
-		return fn()
-	}
-	return fixed
-}
-
-// WithReminder turns on the Saturday reminder: streams of the week whose collabs nobody has checked are listed in channelID (the dev channel) at Saturday 12:00 WIB. It needs WithPartners, because "checked" lives there.
-func (s *Service) WithReminder(channelID string, m ReminderMarker) *Service {
-	s.remindID = channelID
+// WithReminder turns on the Saturday reminder: streams of the week whose collabs nobody has checked are listed in the channel (the dev channel) at Saturday 12:00 WIB. It needs WithPartners, because "checked" lives there. The reminder only runs while the channel function gives a channel.
+func (s *Service) WithReminder(channel func() string, m ReminderMarker) *Service {
+	s.remindTo = channel
 	s.remarker = m
 	return s
 }
 
+// where is what a channel function says right now; a nil function says "".
+func where(channel func() string) string {
+	if channel == nil {
+		return ""
+	}
+	return channel()
+}
+
 // Run checks once a minute whether a recap is due, until ctx ends.
 func (s *Service) Run(ctx context.Context) {
-	s.log.Info("weekly recap is on", "channel", s.recapChannel(), "next", LastDue(s.now()).AddDate(0, 0, 7).Add(s.settle).Format(time.RFC1123))
+	s.log.Info("weekly recap is on", "channel", s.channel(), "next", NextDue(s.now()).Add(s.settle).Format(time.RFC1123))
 	s.tick()
 	ticker := time.NewTicker(checkEvery)
 	defer ticker.Stop()
@@ -170,12 +158,12 @@ func (s *Service) tickRecap() {
 	}
 
 	texts, note := s.render(due)
-	if err := s.post(s.recapChannel(), texts, func() { s.remember(due); s.rememberPosted(now) }); err != nil {
+	if err := s.post(s.channel(), texts, func() { s.remember(due); s.rememberPosted(now) }); err != nil {
 		s.log.Error("could not post the weekly recap; will try again", "err", err)
 		return
 	}
 	s.waiting = false
-	s.sendNote(s.opsChannel(), note)
+	s.sendNote(where(s.ops), note)
 }
 
 // week is what a recap for [from, to) counts. A stream that started before the window and ended after the previous recap went out was left out of that one, so it is counted here. When the previous recap's posting time is not known, it is taken to be just after its due time.
@@ -197,7 +185,7 @@ func (s *Service) render(due time.Time) (texts []string, note string) {
 	if s.guests != nil {
 		guests = s.guests.Guests(from, due)
 	}
-	texts = msg.Recap(BuildWithGuests(entries, guests, from, due, s.partners))
+	texts = msg.Recap(Build(entries, guests, from, due, s.partners))
 	if unknown := UnknownHandles(entries, s.partners); len(unknown) > 0 {
 		note = msg.RecapUnknownHandles(unknown)
 	}
@@ -242,8 +230,8 @@ func (s *Service) rememberPosted(at time.Time) {
 
 // remind posts the Saturday reminder when it is due.
 func (s *Service) remind() {
-	remindID := s.remindChannel()
-	if remindID == "" || s.remarker == nil || s.partners == nil {
+	channel := where(s.remindTo)
+	if channel == "" || s.remarker == nil || s.partners == nil {
 		return
 	}
 	now := s.now()
@@ -261,7 +249,7 @@ func (s *Service) remind() {
 		s.rememberReminder(due) // nothing to check: stay quiet
 		return
 	}
-	if err := s.post(remindID, texts, func() { s.rememberReminder(due) }); err != nil {
+	if err := s.post(channel, texts, func() { s.rememberReminder(due) }); err != nil {
 		s.log.Error("could not post the collab reminder; will try again", "err", err)
 	}
 }

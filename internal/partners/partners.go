@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"regexp"
 	"slices"
@@ -45,12 +46,23 @@ type entry struct {
 	name    string
 	kind    kind
 	tokens  []string // lower-case spellings, whole-word matched
-	solo    []string // the spellings that name this entry by themselves: tokens, minus the ones a partner shares with another partner
+	solo    []string // the spellings that name this entry by themselves: tokens, minus the ones a partner shares with another one
 	members []string // groups and duos only: the display names of the partners in it
 }
 
 // isTeam says whether the entry stands for several partners.
 func (e entry) isTeam() bool { return e.kind == kindGroup || e.kind == kindDuo }
+
+// addTo puts the partners this entry stands for into set: all of its members for a team, the partner itself otherwise.
+func (e entry) addTo(set map[string]bool) {
+	if !e.isTeam() {
+		set[e.name] = true
+		return
+	}
+	for _, m := range e.members {
+		set[m] = true
+	}
+}
 
 // Book is the loaded list. A nil *Book is a valid, empty list: it matches nothing, so the recap simply has no collab line.
 type Book struct {
@@ -71,20 +83,6 @@ func (b *Book) Len() int {
 		}
 	}
 	return n
-}
-
-// Groups returns the names of the groups, in file order.
-func (b *Book) Groups() []string {
-	if b == nil {
-		return nil
-	}
-	var out []string
-	for _, e := range b.entries {
-		if e.kind == kindGroup {
-			out = append(out, e.name)
-		}
-	}
-	return out
 }
 
 // Load reads the file. The error wraps fs.ErrNotExist when there is no file, so the caller can treat that as "feature off".
@@ -108,9 +106,46 @@ func Parse(raw []byte) (*Book, error) {
 
 	r := csv.NewReader(bytes.NewReader(raw))
 	r.Comma = delimiter(raw)
-	r.FieldsPerRecord = -1 // a short row is reported below, with its line number
+	r.FieldsPerRecord = -1 // a short row is reported with its line number
 	r.TrimLeadingSpace = true
 
+	col, err := readHeader(r)
+	if err != nil {
+		return nil, err
+	}
+
+	p := &parser{
+		book:       &Book{known: map[string]bool{}},
+		col:        col,
+		seen:       map[string]int{},
+		memberLine: map[string]int{},
+	}
+	for {
+		rec, err := r.Read()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		line, _ := r.FieldPos(0)
+		if err != nil {
+			p.problem("line %d: %v", line, err)
+			continue
+		}
+		if blank(rec) {
+			continue // Excel often leaves rows of empty commas at the bottom
+		}
+		p.row(rec, line)
+	}
+	p.checkMembers()
+
+	if len(p.problems) > 0 {
+		return nil, joinProblems(p.problems)
+	}
+	p.book.findShared()
+	return p.book, nil
+}
+
+// readHeader reads the first line and says which column holds what.
+func readHeader(r *csv.Reader) (map[string]int, error) {
 	header, err := r.Read()
 	if errors.Is(err, io.EOF) {
 		return nil, errors.New("the file is empty; the first line must be: name,kind,also_matches,members")
@@ -123,7 +158,7 @@ func Parse(raw []byte) (*Book, error) {
 	var problems []string
 	for i, h := range header {
 		h = strings.ToLower(strings.TrimSpace(h))
-		if !contains(knownColumns, h) {
+		if !slices.Contains(knownColumns, h) {
 			problems = append(problems, fmt.Sprintf("unknown column %q (allowed: %s)", h, strings.Join(knownColumns, ", ")))
 			continue
 		}
@@ -135,125 +170,136 @@ func Parse(raw []byte) (*Book, error) {
 	if len(problems) > 0 {
 		return nil, joinProblems(problems)
 	}
-	cell := func(rec []string, name string) string {
-		if i, ok := col[name]; ok && i < len(rec) {
-			return strings.TrimSpace(rec[i])
+	return col, nil
+}
+
+// parser is the state of one Parse: the book being built and the problems found so far.
+type parser struct {
+	book       *Book
+	col        map[string]int
+	problems   []string
+	seen       map[string]int // lower-case name -> line, to catch a name that is listed twice
+	memberLine map[string]int // team name -> line, for checkMembers
+}
+
+func (p *parser) problem(format string, args ...any) {
+	p.problems = append(p.problems, fmt.Sprintf(format, args...))
+}
+
+// cell is the trimmed text of a column in a row ("" when the column is missing).
+func (p *parser) cell(rec []string, name string) string {
+	if i, ok := p.col[name]; ok && i < len(rec) {
+		return strings.TrimSpace(rec[i])
+	}
+	return ""
+}
+
+// row reads one line of the file into an entry. A row with a mistake adds a problem and, when the mistake is in the name or the kind, is skipped.
+func (p *parser) row(rec []string, line int) {
+	name := p.cell(rec, "name")
+	if name == "" {
+		p.problem("line %d: the name is empty", line)
+		return
+	}
+	if strings.Contains(name, ",") {
+		p.problem("line %d (%s): a name cannot contain a comma (commas separate names when typing in /collab)", line, name)
+		return
+	}
+	e := entry{name: name}
+	k, ok := parseKind(p.cell(rec, "kind"))
+	if !ok {
+		p.problem("line %d (%s): kind must be partner, group, duo or ignore, got %q", line, name, p.cell(rec, "kind"))
+		return
+	}
+	e.kind = k
+	if first, dup := p.seen[strings.ToLower(name)]; dup {
+		p.problem("line %d: %s is already on line %d", line, name, first)
+		return
+	}
+	p.seen[strings.ToLower(name)] = line
+
+	members := p.cell(rec, "members")
+	switch {
+	case !e.isTeam() && members != "":
+		p.problem("line %d (%s): only a group or a duo can have members", line, name)
+	case e.isTeam():
+		for _, m := range strings.Split(members, "|") {
+			if m = strings.TrimSpace(m); m != "" {
+				e.members = append(e.members, m)
+			}
 		}
-		return ""
+		if len(e.members) == 0 {
+			p.problem("line %d (%s): a group or duo needs members", line, name)
+		}
+		p.memberLine[name] = line
 	}
 
-	b := &Book{known: map[string]bool{}}
-	seen := map[string]int{}       // lower-case name -> line
-	memberLine := map[string]int{} // group name -> line, for the second pass
-	for {
-		rec, err := r.Read()
-		if errors.Is(err, io.EOF) {
-			break
-		}
-		line, _ := r.FieldPos(0)
-		if err != nil {
-			problems = append(problems, fmt.Sprintf("line %d: %v", line, err))
-			continue
-		}
-		if blank(rec) {
-			continue // Excel often leaves rows of empty commas at the bottom
-		}
+	p.spellings(&e, p.cell(rec, "also_matches"), line)
+	p.book.entries = append(p.book.entries, e)
+}
 
-		name := cell(rec, "name")
-		if name == "" {
-			problems = append(problems, fmt.Sprintf("line %d: the name is empty", line))
-			continue
-		}
-		if strings.Contains(name, ",") {
-			problems = append(problems, fmt.Sprintf("line %d (%s): a name cannot contain a comma (commas separate names when typing in /collab)", line, name))
-			continue
-		}
-		e := entry{name: name}
-		switch strings.ToLower(cell(rec, "kind")) {
-		case "", "partner":
-			e.kind = kindPartner
-		case "ignore":
-			e.kind = kindIgnore
-		case "group":
-			e.kind = kindGroup
-		case "duo":
-			e.kind = kindDuo
-		default:
-			problems = append(problems, fmt.Sprintf("line %d (%s): kind must be partner, group, duo or ignore, got %q", line, name, cell(rec, "kind")))
-			continue
-		}
-		if first, dup := seen[strings.ToLower(name)]; dup {
-			problems = append(problems, fmt.Sprintf("line %d: %s is already on line %d", line, name, first))
-			continue
-		}
-		seen[strings.ToLower(name)] = line
-
-		members := cell(rec, "members")
-		if !e.isTeam() && members != "" {
-			problems = append(problems, fmt.Sprintf("line %d (%s): only a group or a duo can have members", line, name))
-		}
-		if e.isTeam() {
-			for _, m := range strings.Split(members, "|") {
-				if m = strings.TrimSpace(m); m != "" {
-					e.members = append(e.members, m)
-				}
-			}
-			if len(e.members) == 0 {
-				problems = append(problems, fmt.Sprintf("line %d (%s): a group or duo needs members", line, name))
-			}
-			memberLine[name] = line
-		}
-
-		spellings := append([]string{strings.TrimPrefix(name, "@")}, strings.Split(cell(rec, "also_matches"), "|")...)
-		for _, s := range spellings {
-			t := normalise(s)
-			if t == "" {
-				continue // "a||b" or a trailing "|"
-			}
-			if strings.Contains(t, ",") {
-				problems = append(problems, fmt.Sprintf("line %d (%s): %q cannot contain a comma", line, name, s))
-				continue
-			}
-			if utf8.RuneCountInString(t) < 2 || !hasLetterOrDigit(t) {
-				problems = append(problems, fmt.Sprintf("line %d (%s): %q is too short to match safely", line, name, s))
-				continue
-			}
-			if !contains(e.tokens, t) {
-				e.tokens = append(e.tokens, t)
-				b.known[t] = true
-			}
-		}
-		b.entries = append(b.entries, e)
+// parseKind reads the "kind" column; empty means partner.
+func parseKind(s string) (kind, bool) {
+	switch strings.ToLower(s) {
+	case "", "partner":
+		return kindPartner, true
+	case "ignore":
+		return kindIgnore, true
+	case "group":
+		return kindGroup, true
+	case "duo":
+		return kindDuo, true
 	}
+	return 0, false
+}
 
-	// Second pass: a group may list partners that appear further down the file.
+// spellings gives the entry the words that match it in a title: its own name (without a leading "@") and the also_matches column.
+func (p *parser) spellings(e *entry, alsoMatches string, line int) {
+	spellings := append([]string{strings.TrimPrefix(e.name, "@")}, strings.Split(alsoMatches, "|")...)
+	for _, s := range spellings {
+		t := normalise(s)
+		if t == "" {
+			continue // "a||b" or a trailing "|"
+		}
+		if strings.Contains(t, ",") {
+			p.problem("line %d (%s): %q cannot contain a comma", line, e.name, s)
+			continue
+		}
+		if utf8.RuneCountInString(t) < 2 || !hasLetterOrDigit(t) {
+			p.problem("line %d (%s): %q is too short to match safely", line, e.name, s)
+			continue
+		}
+		if !slices.Contains(e.tokens, t) {
+			e.tokens = append(e.tokens, t)
+			p.book.known[t] = true
+		}
+	}
+}
+
+// checkMembers runs after the last row, because a team may list partners that appear further down the file. It also replaces each member by its display name, however it was typed.
+func (p *parser) checkMembers() {
+	entries := p.book.entries
 	byName := map[string]*entry{}
-	for i := range b.entries {
-		byName[strings.TrimPrefix(strings.ToLower(b.entries[i].name), "@")] = &b.entries[i]
+	for i := range entries {
+		byName[strings.TrimPrefix(strings.ToLower(entries[i].name), "@")] = &entries[i]
 	}
-	for i := range b.entries {
-		g := &b.entries[i]
+	for i := range entries {
+		g := &entries[i]
 		if !g.isTeam() {
 			continue
 		}
 		for j, m := range g.members {
-			p := byName[strings.TrimPrefix(strings.ToLower(m), "@")]
+			member := byName[strings.TrimPrefix(strings.ToLower(m), "@")]
 			switch {
-			case p == nil:
-				problems = append(problems, fmt.Sprintf("line %d (%s): member %q is not in the file", memberLine[g.name], g.name, m))
-			case p.kind != kindPartner:
-				problems = append(problems, fmt.Sprintf("line %d (%s): member %q must be a partner, not a group or an ignore row", memberLine[g.name], g.name, m))
+			case member == nil:
+				p.problem("line %d (%s): member %q is not in the file", p.memberLine[g.name], g.name, m)
+			case member.kind != kindPartner:
+				p.problem("line %d (%s): member %q must be a partner, not a group or an ignore row", p.memberLine[g.name], g.name, m)
 			default:
-				g.members[j] = p.name // the display name, however it was typed
+				g.members[j] = member.name
 			}
 		}
 	}
-
-	if len(problems) > 0 {
-		return nil, joinProblems(problems)
-	}
-	b.findShared()
-	return b, nil
 }
 
 // findShared notes the spellings that belong to two or more partners, and gives every entry its solo spellings.
@@ -302,15 +348,8 @@ func (b *Book) Match(title string) []string {
 	text := normalise(title)
 	named := map[string]bool{}
 	for _, e := range b.entries {
-		if e.kind == kindIgnore || !anyWord(text, e.solo) {
-			continue
-		}
-		if e.isTeam() {
-			for _, m := range e.members {
-				named[m] = true
-			}
-		} else {
-			named[e.name] = true
+		if e.kind != kindIgnore && anyWord(text, e.solo) {
+			e.addTo(named)
 		}
 	}
 	return b.inFileOrder(named)
@@ -332,26 +371,11 @@ func (b *Book) Ambiguities(title string) []Ambiguity {
 	for _, n := range b.Match(title) {
 		named[n] = true
 	}
-	words := make([]string, 0, len(b.shared))
-	for w := range b.shared {
-		words = append(words, w)
-	}
-	sort.Strings(words)
 	var out []Ambiguity
-	for _, w := range words {
-		if !hasWord(text, w) {
-			continue
-		}
+	for _, w := range slices.Sorted(maps.Keys(b.shared)) {
 		who := b.shared[w]
-		settled := false
-		for _, n := range who {
-			if named[n] {
-				settled = true
-				break
-			}
-		}
-		if !settled {
-			out = append(out, Ambiguity{Word: w, Candidates: append([]string(nil), who...)})
+		if hasWord(text, w) && !slices.ContainsFunc(who, func(n string) bool { return named[n] }) {
+			out = append(out, Ambiguity{Word: w, Candidates: slices.Clone(who)})
 		}
 	}
 	return out
@@ -370,17 +394,11 @@ func (b *Book) Resolve(text string) (names, unknown []string) {
 		}
 		found := false
 		for _, e := range b.entries {
-			if e.kind == kindIgnore || !contains(e.tokens, t) {
+			if e.kind == kindIgnore || !slices.Contains(e.tokens, t) {
 				continue
 			}
 			found = true
-			if e.isTeam() {
-				for _, m := range e.members {
-					named[m] = true
-				}
-			} else {
-				named[e.name] = true
-			}
+			e.addTo(named)
 		}
 		if !found {
 			unknown = append(unknown, strings.TrimSpace(term))
@@ -403,7 +421,7 @@ func (b *Book) inFileOrder(set map[string]bool) []string {
 // Summary shortens a list of partners for reading: a team whose members are all in the list is named once, and the others keep their own names ("Squad Kocak, @DinaMostarterra"). A bigger team is named before a smaller one, and a team whose members are already covered by another is left out. Teams come first, then the remaining people in the order they were given.
 func (b *Book) Summary(names []string) []string {
 	if b == nil {
-		return append([]string(nil), names...)
+		return slices.Clone(names)
 	}
 	present := map[string]bool{}
 	for _, n := range names {
@@ -498,25 +516,7 @@ func (b *Book) Suggest(typed string, n int) []Suggestion {
 }
 
 func anySubstring(tokens []string, q string) bool {
-	for _, t := range tokens {
-		if strings.Contains(t, q) {
-			return true
-		}
-	}
-	return false
-}
-
-// Has reports whether name is the display name of a partner on the list.
-func (b *Book) Has(name string) bool {
-	if b == nil {
-		return false
-	}
-	for _, e := range b.entries {
-		if e.kind == kindPartner && e.name == name {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(tokens, func(t string) bool { return strings.Contains(t, q) })
 }
 
 // atHandle finds "@something" that is not the tail of a longer word (so an e-mail address is not mistaken for a handle).
@@ -595,15 +595,6 @@ func blank(rec []string) bool {
 		}
 	}
 	return true
-}
-
-func contains(list []string, s string) bool {
-	for _, x := range list {
-		if x == s {
-			return true
-		}
-	}
-	return false
 }
 
 func joinProblems(p []string) error {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Nadif243/fancord-bot/internal/broadcast"
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/msg"
 )
@@ -31,7 +32,7 @@ const (
 
 // ReminderDue is the most recent reminder moment at or before now, and the recap it is about (the next one after that moment).
 func ReminderDue(now time.Time) (remind, recapDue time.Time) {
-	recapDue = LastDue(now).AddDate(0, 0, 7)
+	recapDue = NextDue(now)
 	remind = recapDue.Add(-remindBefore)
 	if remind.After(now) {
 		recapDue = recapDue.AddDate(0, 0, -7)
@@ -83,30 +84,20 @@ type Guests interface {
 
 // Build turns the streams that ended in [from, to) into what the recap says.
 // partners may be nil: the recap then has no collab line.
-func Build(entries []history.Entry, from, to time.Time, partners Matcher) msg.RecapWeek {
-	return BuildWithGuests(entries, nil, from, to, partners)
-}
-
-// BuildWithGuests is Build plus the week's collabs on other channels. They are listed in their own section and their partners count in the collab line, but they add nothing to her stream count, total time, longest stream or busiest day: those are about her own channel.
-func BuildWithGuests(entries []history.Entry, guests []Guest, from, to time.Time, partners Matcher) msg.RecapWeek {
+//
+// The guests (collabs on other channels) are listed in their own section and their partners count in the collab line, but they add nothing to her stream count, total time, longest stream or busiest day: those are about her own channel.
+func Build(entries []history.Entry, guests []Guest, from, to time.Time, partners Matcher) msg.RecapWeek {
 	w := msg.RecapWeek{From: from.In(WIB), To: to.In(WIB)}
 
-	type item struct {
-		stream msg.RecapStream
-		who    []string // partners, one name each
-	}
-	var items []item
+	var own []streamWho
 	for _, e := range entries {
 		st, who := streamOf(e, partners)
-		items = append(items, item{stream: st, who: who})
+		own = append(own, streamWho{stream: st, names: who})
 	}
-	sort.SliceStable(items, func(i, j int) bool { return items[i].stream.Start.Before(items[j].stream.Start) })
-
-	var perStream []streamWho
-	for _, it := range items {
+	sortByStart(own)
+	for _, it := range own {
 		w.Streams = append(w.Streams, it.stream)
 		w.Total += it.stream.Duration
-		perStream = append(perStream, streamWho{start: it.stream.Start, names: it.who})
 	}
 
 	// With one stream (or one day) "longest" and "busiest" say nothing new, so those lines are left out.
@@ -114,33 +105,34 @@ func BuildWithGuests(entries []history.Entry, guests []Guest, from, to time.Time
 		w.Longest = longest(w.Streams)
 		w.Busiest = busiestDay(w.Streams)
 	}
+
 	guests = slices.Clone(guests)
 	sort.SliceStable(guests, func(i, j int) bool { return guests[i].Start.Before(guests[j].Start) })
+	all := slices.Clone(own)
 	for _, g := range guests {
-		start := g.Start.In(WIB)
-		st := msg.RecapStream{Title: g.Title, URL: g.URL, Start: start, Duration: g.Duration, Channel: g.Channel}
+		st := msg.RecapStream{Title: g.Title, URL: g.URL, Start: g.Start.In(WIB), Duration: g.Duration, Channel: g.Channel}
 		if partners != nil {
 			st.With = partners.Summary(g.Partners)
 		}
 		w.Guests = append(w.Guests, st)
-		perStream = append(perStream, streamWho{start: start, names: g.Partners})
+		all = append(all, streamWho{stream: st, names: g.Partners})
 	}
 	// countCollabs wants oldest first, and the guests were added after her own.
-	sort.SliceStable(perStream, func(i, j int) bool { return perStream[i].start.Before(perStream[j].start) })
-	w.Collabs = countCollabs(perStream)
+	sortByStart(all)
+	w.Collabs = countCollabs(all)
 	return w
+}
+
+func sortByStart(list []streamWho) {
+	sort.SliceStable(list, func(i, j int) bool { return list[i].stream.Start.Before(list[j].stream.Start) })
 }
 
 // streamOf describes one history entry for a message, and returns who was in it (one name each, before any team is shortened). partners may be nil.
 func streamOf(e history.Entry, partners Matcher) (msg.RecapStream, []string) {
-	start := e.Start
-	if start.IsZero() {
-		start = e.End // we never learnt the start; this at least gives a day
-	}
 	st := msg.RecapStream{
 		Title:    e.Title,
-		URL:      "https://www.youtube.com/watch?v=" + e.VideoID,
-		Start:    start.In(WIB),
+		URL:      broadcast.WatchURL(e.VideoID),
+		Start:    e.StartedAt().In(WIB),
 		Duration: e.Duration(),
 	}
 	var who []string
@@ -151,17 +143,17 @@ func streamOf(e history.Entry, partners Matcher) (msg.RecapStream, []string) {
 	return st, who
 }
 
-// streamWho is a stream's start (in WIB) and who was in it.
+// streamWho is a stream (its start in WIB) and who was in it, one name each.
 type streamWho struct {
-	start time.Time
-	names []string
+	stream msg.RecapStream
+	names  []string
 }
 
 // countCollabs counts, for every partner who was in a stream, the streams they were in and on which days. The streams must be oldest first, so the days come out in order. Most streams first; a tie goes to the name that comes first alphabetically.
 func countCollabs(streams []streamWho) []msg.RecapCollab {
 	tally := map[string]*msg.RecapCollab{}
 	for _, s := range streams {
-		y, m, d := s.start.Date()
+		y, m, d := s.stream.Start.Date()
 		day := time.Date(y, m, d, 0, 0, 0, 0, WIB)
 		for _, name := range s.names { // each name once per stream
 			c := tally[name]

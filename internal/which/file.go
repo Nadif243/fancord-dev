@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"slices"
 	"sort"
 	"sync"
@@ -57,14 +56,9 @@ type File struct {
 // ErrUnknown means there is no such question.
 var ErrUnknown = errors.New("unknown question")
 
-// OpenFile reads the file, creating it on first run. A file that cannot be understood is an error: carrying on with an empty one would ask everything again.
+// OpenFile reads the file, creating it on first run (and its folder, which is what atomicfile does when it saves). A file that cannot be understood is an error: carrying on with an empty one would ask everything again.
 func OpenFile(path string) (*File, error) {
 	f := &File{path: path, data: fileData{Version: formatVersion, Items: map[string]Item{}}}
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("cannot create the folder for %s: %w", path, err)
-		}
-	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := f.save(); err != nil {
@@ -162,12 +156,12 @@ func (f *File) Items() []Item {
 	return out
 }
 
-// drop forgets a question that could not be posted, so the next scan asks again.
-func (f *File) drop(key string) {
+// drop forgets a question that could not be posted, so the next scan asks again. It is forgotten for this run even when saving fails, and the error says so.
+func (f *File) drop(key string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.data.Items, key)
-	_ = f.save()
+	return f.save()
 }
 
 func copyItem(it Item) Item {

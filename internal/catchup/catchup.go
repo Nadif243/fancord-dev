@@ -140,14 +140,10 @@ func (r *Reporter) report() {
 
 // recapStream describes a history entry for a message.
 func recapStream(e history.Entry) msg.RecapStream {
-	start := e.Start
-	if start.IsZero() {
-		start = e.End
-	}
 	return msg.RecapStream{
 		Title:    e.Title,
 		URL:      broadcast.WatchURL(e.VideoID),
-		Start:    start,
+		Start:    e.StartedAt(),
 		Duration: e.Duration(),
 	}
 }

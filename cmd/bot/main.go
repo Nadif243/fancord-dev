@@ -263,17 +263,16 @@ func buildYouTubeFeatures(
 
 	// The recap waits a little longer than one poll for a stream that just ended to be seen as ended.
 	settle := cfg.YouTube.PollEvery + time.Minute
-	rc := recap.New(streams, messenger, memory, cfg.Channels.Recap, settle, log).
-		WithPartners(who, cfg.Channels.Ops).
-		WithReminder(cfg.Channels.Test, memory).
-		WithLiveChannels(live.Getter(settings.Recap), live.Getter(settings.Ops), live.Getter(settings.Reminder))
+	rc := recap.New(streams, messenger, memory, live.Getter(settings.Recap), settle, log).
+		WithPartners(who, live.Getter(settings.Ops)).
+		WithReminder(live.Getter(settings.Reminder), memory)
 
 	questions, err := which.OpenFile(cfg.WhichFile)
 	if err != nil {
 		return nil, err
 	}
 	log.Info("nickname questions file ready", "path", cfg.WhichFile)
-	asks := which.New(questions, streams, who, tags, messenger, which.Settings{ChannelFn: live.Getter(settings.Review)}, log)
+	asks := which.New(questions, streams, who, tags, messenger, live.Getter(settings.Review), log)
 
 	decisions, err := outside.OpenFile(cfg.Review.File)
 	if err != nil {

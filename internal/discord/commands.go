@@ -70,7 +70,6 @@ const (
 // Deps is everything the commands need from the rest of the bot, gathered in one struct so NewRouter does not grow a new parameter for every feature.
 type Deps struct {
 	DevAnnouncer     *broadcast.Announcer // for /devstream only: it posts fake streams and forgets them
-	DevChannelID     string               // the only channel where dev-only commands work
 	Source           StreamSource         // nil when no YouTube key is configured
 	YouTubeChannelID string               // her channel, the default for /devcheck
 	Recap            RecapPreviewer       // nil when the recap is off
@@ -81,13 +80,10 @@ type Deps struct {
 	Rodok            Rodoker              // nil when /rodok is not set up
 	Roles            RolePanel            // nil when the role panel is off
 
-	// LinkChannelID is the fan channel where links are read from messages.
-	LinkChannelID string
-
-	// These three are asked each time when set (so /setup can change them while the bot runs) and replace the fixed IDs of the same name.
-	DevChannel  func() string
-	LinkChannel func() string
-	ReviewRole  func() string
+	// These three are asked each time, so /setup can change them while the bot runs. A nil function means "not set".
+	DevChannel  func() string // the staff channel: the only place the dev commands and /collab work
+	LinkChannel func() string // the fan channel where links are read from messages
+	ReviewRole  func() string // the role that may press Confirm and Ignore; when empty, members with Manage Server or Administrator may instead
 
 	// Settings is what /setup changes. Nil: /setup says it is not available.
 	Settings SettingsAdmin
@@ -95,17 +91,20 @@ type Deps struct {
 	// ListeningForMessages says whether the bot asked Discord for the Message Content intent when it connected. A fan channel set later by /setup needs one restart before it works if this is false.
 	ListeningForMessages bool
 
-	// ReviewRoleID is the role that may press Confirm and Ignore. When it is empty, members with Manage Server or Administrator may instead.
-	ReviewRoleID string
+	// RodokProtectedRole is the role whose members cannot be rodok-ed. Empty: nobody is protected.
+	RodokProtectedRole string
+}
+
+// current is what a setting function says right now ("" when there is none).
+func current(fn func() string) string {
+	if fn == nil {
+		return ""
+	}
+	return fn()
 }
 
 // devChannel, linkChannel and reviewRole are what the deps say right now.
-func (r *Router) devChannel() string {
-	if r.deps.DevChannel != nil {
-		return r.deps.DevChannel()
-	}
-	return r.deps.DevChannelID
-}
+func (r *Router) devChannel() string { return current(r.deps.DevChannel) }
 
 // inDevChannel says whether the command was typed in the staff channel, the only place the dev commands and /collab work.
 func (r *Router) inDevChannel(i *discordgo.InteractionCreate) bool {
@@ -118,19 +117,9 @@ func (r *Router) mayReview(m *discordgo.Member) bool {
 	return canReview(m, r.reviewRole())
 }
 
-func (r *Router) linkChannel() string {
-	if r.deps.LinkChannel != nil {
-		return r.deps.LinkChannel()
-	}
-	return r.deps.LinkChannelID
-}
+func (r *Router) linkChannel() string { return current(r.deps.LinkChannel) }
 
-func (r *Router) reviewRole() string {
-	if r.deps.ReviewRole != nil {
-		return r.deps.ReviewRole()
-	}
-	return r.deps.ReviewRoleID
-}
+func (r *Router) reviewRole() string { return current(r.deps.ReviewRole) }
 
 // Rodoker counts and limits /rodok. *rodok.Service satisfies it.
 type Rodoker interface {
@@ -147,6 +136,7 @@ type Router struct {
 	deps    Deps
 }
 
+// NewRouter builds the router with the definition and handler of every command.
 func NewRouter(log *slog.Logger, deps Deps) *Router {
 	r := &Router{
 		log:      log,
@@ -384,7 +374,12 @@ func canReview(m *discordgo.Member, roleID string) bool {
 	if roleID != "" {
 		return slices.Contains(m.Roles, roleID)
 	}
-	return m.Permissions&(permAdministrator|permManageGuild) != 0
+	return isManager(m)
+}
+
+// isManager says whether the member has Administrator or Manage Server.
+func isManager(m *discordgo.Member) bool {
+	return m != nil && m.Permissions&(permAdministrator|permManageGuild) != 0
 }
 
 // onComponent handles a press on a button under a review message.
@@ -403,19 +398,8 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 		return // not one of ours
 	}
 	log := r.log.With("button", action, "video", videoID)
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Error("button panicked", "panic", rec)
-			_ = replyPrivate(s, i, msg.CommandFailed)
-		}
-	}()
-
-	switch {
-	case r.deps.Outside == nil:
-		_ = replyPrivate(s, i, msg.CollabReviewOff)
-		return
-	case !r.mayReview(i.Member):
-		_ = replyPrivate(s, i, msg.CollabReviewDenied)
+	defer recoverButton(s, i, log)
+	if !r.guardReview(s, i, r.deps.Outside != nil) {
 		return
 	}
 
@@ -427,17 +411,7 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 	if err != nil {
 		log.Error("could not save the decision (it holds until restart)", "err", err)
 	}
-	// Edit the review message itself: new text, and an EMPTY list of components
-	// (not nil) so the buttons disappear.
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
-		Type: discordgo.InteractionResponseUpdateMessage,
-		Data: &discordgo.InteractionResponseData{
-			Content:         res.Text,
-			Components:      []discordgo.MessageComponent{},
-			AllowedMentions: nobody(),
-		},
-	})
-	if err != nil {
+	if err := updateMessage(s, i, res.Text); err != nil {
 		log.Error("could not update the review message", "err", err)
 	}
 }
@@ -445,18 +419,8 @@ func (r *Router) onComponent(s *discordgo.Session, i *discordgo.InteractionCreat
 // onWhich handles a press on a button under a "who is meant?" question. The people who may press are the same as for the review buttons.
 func (r *Router) onWhich(s *discordgo.Session, i *discordgo.InteractionCreate, key, choice string) {
 	log := r.log.With("button", "which", "question", key)
-	defer func() {
-		if rec := recover(); rec != nil {
-			log.Error("button panicked", "panic", rec)
-			_ = replyPrivate(s, i, msg.CommandFailed)
-		}
-	}()
-	switch {
-	case r.deps.Which == nil:
-		_ = replyPrivate(s, i, msg.CollabReviewOff)
-		return
-	case !r.mayReview(i.Member):
-		_ = replyPrivate(s, i, msg.CollabReviewDenied)
+	defer recoverButton(s, i, log)
+	if !r.guardReview(s, i, r.deps.Which != nil) {
 		return
 	}
 	res, err := r.deps.Which.Answer(key, choice, userName(i))
@@ -467,17 +431,42 @@ func (r *Router) onWhich(s *discordgo.Session, i *discordgo.InteractionCreate, k
 	if err != nil {
 		log.Error("could not save the answer (it holds until restart)", "err", err)
 	}
-	err = s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+	if err := updateMessage(s, i, res.Text); err != nil {
+		log.Error("could not update the question", "err", err)
+	}
+}
+
+// recoverButton is deferred by the button handlers: a bug in one must not take the whole bot down.
+func recoverButton(s *discordgo.Session, i *discordgo.InteractionCreate, log *slog.Logger) {
+	if rec := recover(); rec != nil {
+		log.Error("button panicked", "panic", rec)
+		_ = replyPrivate(s, i, msg.CommandFailed)
+	}
+}
+
+// guardReview answers, and returns false, when a review-style button must not be handled: the feature is off (on is false) or this member may not press it.
+func (r *Router) guardReview(s *discordgo.Session, i *discordgo.InteractionCreate, on bool) bool {
+	switch {
+	case !on:
+		_ = replyPrivate(s, i, msg.CollabReviewOff)
+		return false
+	case !r.mayReview(i.Member):
+		_ = replyPrivate(s, i, msg.CollabReviewDenied)
+		return false
+	}
+	return true
+}
+
+// updateMessage edits the message the button sits under: new text, and an EMPTY list of components (not nil) so the buttons disappear.
+func updateMessage(s *discordgo.Session, i *discordgo.InteractionCreate, text string) error {
+	return s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
 		Type: discordgo.InteractionResponseUpdateMessage,
 		Data: &discordgo.InteractionResponseData{
-			Content:         res.Text,
+			Content:         text,
 			Components:      []discordgo.MessageComponent{},
 			AllowedMentions: nobody(),
 		},
 	})
-	if err != nil {
-		log.Error("could not update the question", "err", err)
-	}
 }
 
 // handleCollabLink queues the YouTube links in what a fan typed. X links are not read here (that needs more than the three seconds a command has); the fan channel reads them.
@@ -485,12 +474,7 @@ func (r *Router) handleCollabLink(s *discordgo.Session, i *discordgo.Interaction
 	if r.deps.Outside == nil {
 		return replyPrivate(s, i, msg.CollabLinkOff)
 	}
-	var text string
-	for _, opt := range i.ApplicationCommandData().Options {
-		if opt.Name == "link" {
-			text = opt.StringValue()
-		}
-	}
+	text := optValue(i.ApplicationCommandData().Options, "link")
 	return replyPrivate(s, i, linkText(r.submit(false, userKey(i), userName(i), text)))
 }
 
@@ -499,8 +483,11 @@ func (r *Router) handleRodok(s *discordgo.Session, i *discordgo.InteractionCreat
 	if r.deps.Rodok == nil {
 		return replyPrivate(s, i, msg.CollabLinkOff)
 	}
-	target, isBot := pickUser(i.ApplicationCommandData(), "user")
-	text, public, err := rodokAnswer(r.deps.Rodok, userKey(i), target, isBot)
+	data := i.ApplicationCommandData()
+	target, isBot := pickUser(data, "user")
+	protected := r.deps.RodokProtectedRole != "" &&
+		slices.Contains(pickRoles(data, "user"), r.deps.RodokProtectedRole)
+	text, public, err := rodokAnswer(r.deps.Rodok, userKey(i), target, isBot, protected)
 	if err != nil {
 		// The count is right for this run but could not be saved.
 		r.log.Error("could not save the rodok counts", "err", err)
@@ -525,11 +512,11 @@ const boardColor = 0xE8505B
 
 // handleRodokBoard shows the leaderboard as an embed. Like the normal answer it is public, and the mentions in it show names without pinging anyone.
 func (r *Router) handleRodokBoard(s *discordgo.Session, i *discordgo.InteractionCreate) error {
-	board, ok := r.deps.Rodok.(rodok.Board)
-	if r.deps.Rodok == nil || !ok {
+	board, ok := r.deps.Rodok.(rodok.Board) // false too when Rodok is nil
+	if !ok {
 		return replyPrivate(s, i, msg.RodokBoardOff)
 	}
-	embed := rodokBoardEmbed(board, boardIsDoers(i.ApplicationCommandData()), userKey(i))
+	embed := rodokBoardEmbed(board, optValue(i.ApplicationCommandData().Options, "peringkat") == boardDoers, userKey(i))
 	if embed == nil {
 		return reply(s, i, msg.RodokBoardEmpty)
 	}
@@ -537,17 +524,6 @@ func (r *Router) handleRodokBoard(s *discordgo.Session, i *discordgo.Interaction
 		Type: discordgo.InteractionResponseChannelMessageWithSource,
 		Data: &discordgo.InteractionResponseData{Embeds: []*discordgo.MessageEmbed{embed}, AllowedMentions: nobody()},
 	})
-}
-
-// boardIsDoers says whether the person picked "pelaku" (true) or "korban".
-func boardIsDoers(data discordgo.ApplicationCommandInteractionData) bool {
-	for _, opt := range data.Options {
-		if opt.Name == "peringkat" {
-			kind, _ := opt.Value.(string)
-			return kind == boardDoers
-		}
-	}
-	return false
 }
 
 // rodokBoardEmbed builds the leaderboard; nil when nobody has rodok-ed yet.
@@ -584,7 +560,7 @@ func rodokBoardEmbed(b rodok.Board, doers bool, viewer string) *discordgo.Messag
 }
 
 // rodokAnswer decides what to say. public is false only for the spam messages and the "not in a server" case. An error only means the count could not be saved; the text is still right.
-func rodokAnswer(r Rodoker, actor, target string, targetIsBot bool) (text string, public bool, err error) {
+func rodokAnswer(r Rodoker, actor, target string, targetIsBot, targetProtected bool) (text string, public bool, err error) {
 	if actor == "" || target == "" { // a direct message: there is no server member
 		return msg.RodokGuildOnly, false, nil
 	}
@@ -594,6 +570,9 @@ func rodokAnswer(r Rodoker, actor, target string, targetIsBot bool) (text string
 	}
 	if targetIsBot {
 		return msg.RodokBot, true, nil
+	}
+	if targetProtected {
+		return msg.RodokProtected, true, nil
 	}
 
 	res, err := r.Do(actor, target)
@@ -620,6 +599,23 @@ func pickUser(data discordgo.ApplicationCommandInteractionData, name string) (id
 		}
 	}
 	return id, isBot
+}
+
+// pickRoles returns the role IDs of the member picked in the named option. Discord sends the member's details in "resolved"; somebody who is not in the server has none.
+func pickRoles(data discordgo.ApplicationCommandInteractionData, name string) []string {
+	if data.Resolved == nil { // reading a field through a nil pointer would panic
+		return nil
+	}
+	for _, opt := range data.Options {
+		if opt.Name != name {
+			continue
+		}
+		id, _ := opt.Value.(string)
+		if m := data.Resolved.Members[id]; m != nil {
+			return m.Roles
+		}
+	}
+	return nil
 }
 
 // submit hands a person's text to the review service. Only the fan channel reads X posts: a slash command has three seconds to answer, which an X lookup can exceed.
@@ -674,7 +670,10 @@ func channelAnswer(r outside.Reply) (reaction, reply string) {
 
 // fanMessage says whether a message is one the fan channel should read, and who sent it. Bots (this one included) and every other channel are skipped.
 func (r *Router) fanMessage(m *discordgo.MessageCreate) (who, name string, ok bool) {
-	if m == nil || m.Message == nil || r.linkChannel() == "" || m.ChannelID != r.linkChannel() || r.deps.Outside == nil {
+	if m == nil || m.Message == nil || r.deps.Outside == nil {
+		return "", "", false
+	}
+	if link := r.linkChannel(); link == "" || m.ChannelID != link {
 		return "", "", false
 	}
 	if m.Author == nil || m.Author.Bot {
@@ -715,6 +714,17 @@ func (r *Router) OnMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
 			log.Warn("could not reply", "err", err)
 		}
 	}
+}
+
+// optValue reads one option's value as text (channel and role options carry their ID as text). A missing option reads as "".
+func optValue(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
+	for _, o := range opts {
+		if o.Name == name {
+			v, _ := o.Value.(string)
+			return v
+		}
+	}
+	return ""
 }
 
 // userKey identifies who ran the command (their Discord ID).
@@ -918,19 +928,8 @@ func (r *Router) handleCollab(s *discordgo.Session, i *discordgo.InteractionCrea
 		return reply(s, i, msg.CollabOff)
 	}
 
-	var stream, add, remove string
-	for _, opt := range i.ApplicationCommandData().Options {
-		switch opt.Name {
-		case "stream":
-			stream = opt.StringValue()
-		case "add":
-			add = opt.StringValue()
-		case "remove":
-			remove = opt.StringValue()
-		}
-	}
-
-	out, err := r.deps.Collab.Change(collabs.VideoID(stream), add, remove)
+	opts := i.ApplicationCommandData().Options
+	out, err := r.deps.Collab.Change(collabs.VideoID(optValue(opts, "stream")), optValue(opts, "add"), optValue(opts, "remove"))
 	switch {
 	case errors.Is(err, collabs.ErrNoStream):
 		return reply(s, i, msg.CollabNoStream)

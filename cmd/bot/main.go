@@ -145,7 +145,6 @@ func run(log *slog.Logger) error {
 
 	deps := discord.Deps{
 		DevAnnouncer:         devAnnouncer,
-		DevChannelID:         cfg.Channels.Test,
 		Source:               source,
 		YouTubeChannelID:     cfg.YouTube.ChannelID,
 		Rodok:                rodok.New(rodokCounts),

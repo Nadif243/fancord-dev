@@ -3,6 +3,7 @@ package discord
 import (
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/bwmarrin/discordgo"
 
@@ -31,13 +32,11 @@ const (
 )
 
 // canSetup says whether this member may use /setup.
-func canSetup(m *discordgo.Member) bool {
-	return m != nil && m.Permissions&(permAdministrator|permManageGuild) != 0
-}
+func canSetup(m *discordgo.Member) bool { return isManager(m) }
 
 // addSetup registers /setup with its four subcommands.
 func (r *Router) addSetup() {
-	which := func(kind settings.Kind) []*discordgo.ApplicationCommandOptionChoice {
+	choicesOf := func(kind settings.Kind) []*discordgo.ApplicationCommandOptionChoice {
 		var out []*discordgo.ApplicationCommandOptionChoice
 		for _, i := range settings.All {
 			if i.Kind == kind {
@@ -46,7 +45,8 @@ func (r *Router) addSetup() {
 		}
 		return out
 	}
-	all := append(which(settings.ChannelKind), which(settings.RoleKind)...)
+	channels, roles := choicesOf(settings.ChannelKind), choicesOf(settings.RoleKind)
+	all := slices.Concat(channels, roles)
 	pick := func(choices []*discordgo.ApplicationCommandOptionChoice) *discordgo.ApplicationCommandOption {
 		return &discordgo.ApplicationCommandOption{
 			Type: discordgo.ApplicationCommandOptionString, Name: "which", Description: msg.SetupWhichDescription,
@@ -63,7 +63,7 @@ func (r *Router) addSetup() {
 			{
 				Type: discordgo.ApplicationCommandOptionSubCommand, Name: "channel", Description: msg.SetupChannelDescription,
 				Options: []*discordgo.ApplicationCommandOption{
-					pick(which(settings.ChannelKind)),
+					pick(channels),
 					{
 						Type: discordgo.ApplicationCommandOptionChannel, Name: "channel", Description: msg.SetupChannelOption, Required: true,
 						ChannelTypes: []discordgo.ChannelType{discordgo.ChannelTypeGuildText, discordgo.ChannelTypeGuildNews},
@@ -73,7 +73,7 @@ func (r *Router) addSetup() {
 			{
 				Type: discordgo.ApplicationCommandOptionSubCommand, Name: "role", Description: msg.SetupRoleDescription,
 				Options: []*discordgo.ApplicationCommandOption{
-					pick(which(settings.RoleKind)),
+					pick(roles),
 					{Type: discordgo.ApplicationCommandOptionRole, Name: "role", Description: msg.SetupRoleOption, Required: true},
 				},
 			},
@@ -113,17 +113,6 @@ func (r *Router) handleSetup(s *discordgo.Session, i *discordgo.InteractionCreat
 		return replyPrivate(s, i, setupSave(r.deps.Settings, env, key, sub.Name == "role", id))
 	}
 	return replyPrivate(s, i, msg.SetupBad)
-}
-
-// optValue reads one option's value as text (channel and role options carry their ID as text).
-func optValue(opts []*discordgo.ApplicationCommandInteractionDataOption, name string) string {
-	for _, o := range opts {
-		if o.Name == name {
-			v, _ := o.Value.(string)
-			return v
-		}
-	}
-	return ""
 }
 
 // neededPerms is what the bot must be allowed to do in the channel for a setting: the fan channel is read and reacted to, the others only posted in.
@@ -240,7 +229,7 @@ func setupSave(a SettingsAdmin, env setupEnv, key settings.Key, isRole bool, id 
 
 	var notes []string
 	if err := a.Set(key, id); err != nil {
-		if !isSaveError(err) {
+		if errors.Is(err, settings.ErrRefused) { // refused; any other error only means the file could not be written
 			return msg.SetupBad
 		}
 		notes = append(notes, msg.SetupNoSave)
@@ -280,11 +269,6 @@ func setupSave(a SettingsAdmin, env setupEnv, key settings.Key, isRole bool, id 
 	return msg.SetupSaved(info.Label, mention, notes)
 }
 
-// isSaveError tells "could not write the file" (the value is still in force) from "the value was refused".
-func isSaveError(err error) bool {
-	return !errors.Is(err, settings.ErrRefused)
-}
-
 // setupReset forgets a saved value.
 func setupReset(a SettingsAdmin, which string) string {
 	key := settings.Key(which)
@@ -293,11 +277,12 @@ func setupReset(a SettingsAdmin, which string) string {
 		return msg.SetupBad
 	}
 	had, err := a.Reset(key)
-	text := msg.SetupReset(info.Label, "", had)
+	mention := ""
 	if had {
-		id, _ := a.Where(key)
-		text = msg.SetupReset(info.Label, mentionOf(info.Kind, id), true)
+		id, _ := a.Where(key) // the value now in force after the reset
+		mention = mentionOf(info.Kind, id)
 	}
+	text := msg.SetupReset(info.Label, mention, had)
 	if err != nil {
 		text += "\n" + msg.SetupNoSave
 	}

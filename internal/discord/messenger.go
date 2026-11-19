@@ -66,7 +66,7 @@ func (m SessionMessenger) Edit(channelID, messageID, content string) error {
 // wrapGone marks a "message does not exist" answer with broadcast.ErrGone and passes every other error (and nil) through unchanged.
 func wrapGone(err error) error {
 	if isGone(err) {
-		return fmt.Errorf("%w: %v", broadcast.ErrGone, err)
+		return fmt.Errorf("%w: %w", broadcast.ErrGone, err)
 	}
 	return err
 }
@@ -109,7 +109,7 @@ func (m SessionMessenger) Ping(channelID, content, roleID string) error {
 }
 
 // SendCard posts a tweet card: a message built from Discord's newer display components, which discordgo's ordinary message type does not carry. The body is already finished JSON-ready data, so it goes out through the library's plain request call (which still handles rate limits).
-
+//
 // Discord answering 400 means it did not accept the card as built; that is reported as tweetcard.ErrRejected so the caller can send a plain link instead. Any other failure is returned as it is.
 func (m SessionMessenger) SendCard(channelID string, card tweetcard.Payload) (string, error) {
 	body, err := m.S.Request(http.MethodPost, discordgo.EndpointChannelMessages(channelID), card)

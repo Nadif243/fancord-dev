@@ -13,30 +13,49 @@ import (
 
 // model decides what a card for this post shows. It reports false when X did not send enough to show the post faithfully (a reposted or quoted post that is missing, say); the relay then sends the plain link, which Discord and X can preview on their own.
 
-// A repost is shown as the post that was reposted: its author, text, media and numbers. The line above the card says that she reposted it.
+// A repost is shown as the post that was reposted: its author, text, media and time. The line above the card says that she reposted it.
 func (r *Relay) model(ctx context.Context, st State, p xapi.Post) (tweetcard.Model, bool) {
-	m := tweetcard.Model{PostURL: r.postURL(p.ID), Posted: p.CreatedAt}
 	if p.Kind == xapi.Repost {
-		o := p.Original
-		if !o.Known() {
-			return m, false
-		}
-		m.Name, m.Handle, m.AvatarURL = o.Author.Name, o.Author.Username, o.Author.AvatarURL
-		m.PostURL = "https://x.com/" + o.Author.Username + "/status/" + o.ID
-		if !o.CreatedAt.IsZero() {
-			m.Posted = o.CreatedAt
-		}
-		m.Caption = o.Caption
-		m.Translation = r.translate(ctx, o.Caption)
-		m.Media, m.MediaMissing = cardMedia(o.Media), o.MediaMissing
-		m.Lead = msg.TweetLead("repost", o.Author.Username, false)
-		return m, true
+		return r.repostModel(ctx, p)
 	}
+	return r.postModel(ctx, st, p)
+}
 
+// noteMissing logs a post whose media X named but did not describe, so a
+// pattern can be seen; the card then says there is more on X.
+func (r *Relay) noteMissing(postID, of string, missing bool) {
+	if missing {
+		r.log.Warn("tweet relay: X named media it did not describe", "post", postID, "of", of)
+	}
+}
+
+func (r *Relay) repostModel(ctx context.Context, p xapi.Post) (tweetcard.Model, bool) {
+	m := tweetcard.Model{PostURL: statusURL(r.set.Username, p.ID), Posted: p.CreatedAt}
+	o := p.Original
+	if !o.Known() {
+		return m, false
+	}
+	m.Name, m.Handle, m.AvatarURL = o.Author.Name, o.Author.Username, o.Author.AvatarURL
+	m.PostURL = statusURL(o.Author.Username, o.ID)
+	if !o.CreatedAt.IsZero() {
+		m.Posted = o.CreatedAt
+	}
+	m.Caption = o.Caption
+	m.Translation = r.translate(ctx, o.Caption)
+	m.Media, m.MediaMissing = cardMedia(o.Media), o.MediaMissing
+	r.noteMissing(p.ID, "the reposted post "+o.ID, o.MediaMissing)
+	m.Lead = msg.TweetLead("repost", o.Author.Username, false)
+	return m, true
+}
+
+// postModel is the card of her own post, a quote or a reply.
+func (r *Relay) postModel(ctx context.Context, st State, p xapi.Post) (tweetcard.Model, bool) {
+	m := tweetcard.Model{PostURL: statusURL(r.set.Username, p.ID), Posted: p.CreatedAt}
 	m.Name, m.Handle, m.AvatarURL = st.ProfileName, r.set.Username, st.ProfileAvatar
 	m.Caption = p.Caption
 	m.Translation = r.translate(ctx, p.Caption)
 	m.Media, m.MediaMissing = cardMedia(p.Media), p.MediaMissing
+	r.noteMissing(p.ID, "the post itself", p.MediaMissing)
 
 	target := ""
 	if q := p.Quoted; q != nil {
@@ -46,12 +65,13 @@ func (r *Relay) model(ctx context.Context, st State, p xapi.Post) (tweetcard.Mod
 		m.Quote = &tweetcard.Quote{
 			Name:         q.Author.Name,
 			Handle:       q.Author.Username,
-			URL:          "https://x.com/" + q.Author.Username + "/status/" + q.ID,
+			URL:          statusURL(q.Author.Username, q.ID),
 			Text:         q.Caption,
 			Translation:  r.translate(ctx, q.Caption),
 			Media:        cardMedia(q.Media),
 			MediaMissing: q.MediaMissing,
 		}
+		r.noteMissing(p.ID, "the quoted post "+q.ID, q.MediaMissing)
 		target = q.Author.Username
 	}
 
@@ -86,11 +106,7 @@ func (r *Relay) translate(ctx context.Context, text string) string {
 	if r.set.Translator == nil || !translate.IsJapanese(text) {
 		return ""
 	}
-	parent := r.parent
-	if parent == nil {
-		parent = ctx
-	}
-	tctx, cancel := context.WithTimeout(parent, translateTimeout)
+	tctx, cancel := context.WithTimeout(ctx, translateTimeout)
 	defer cancel()
 	got, err := r.set.Translator.Translate(tctx, text)
 	if err != nil {

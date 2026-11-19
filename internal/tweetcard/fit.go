@@ -5,14 +5,19 @@ import (
 	"unicode/utf8"
 )
 
-// units is the length of s the way Discord limits count it, in UTF-16 units: a character outside the basic plane (most emoji) counts as two.
+// width is how many UTF-16 units a character takes, the way Discord's limits count: one, or two for a character outside the basic plane (most emoji).
+func width(r rune) int {
+	if r >= 0x10000 {
+		return 2
+	}
+	return 1
+}
+
+// units is the length of s the way Discord limits count it.
 func units(s string) int {
 	n := 0
 	for _, r := range s {
-		n++
-		if r >= 0x10000 {
-			n++
-		}
+		n += width(r)
 	}
 	return n
 }
@@ -62,10 +67,7 @@ func cut(s string, max int) string {
 	}
 	n, end := 0, 0
 	for i, r := range s {
-		w := 1
-		if r >= 0x10000 {
-			w = 2
-		}
+		w := width(r)
 		if n+w > room {
 			break
 		}

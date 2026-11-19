@@ -46,18 +46,27 @@ func (g *Gemini) Translate(ctx context.Context, text string) (string, error) {
 	if r := []rune(text); len(r) > maxInputRunes {
 		text = string(r[:maxInputRunes])
 	}
+	raw, err := g.generate(ctx, text)
+	if err != nil {
+		return "", err
+	}
+	return answerText(raw)
+}
+
+// generate sends the text to the model and returns the body of a good answer.
+func (g *Gemini) generate(ctx context.Context, text string) ([]byte, error) {
 	body, err := json.Marshal(map[string]any{
 		"systemInstruction": map[string]any{"parts": []map[string]string{{"text": systemPrompt(g.target)}}},
 		"contents":          []map[string]any{{"role": "user", "parts": []map[string]string{{"text": text}}}},
 		"generationConfig":  map[string]any{"temperature": 0.2, "maxOutputTokens": 4096},
 	})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	endpoint := g.base + "/models/" + url.PathEscape(g.model) + ":generateContent"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", fmt.Errorf("gemini: %w", err)
+		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-goog-api-key", g.key)
@@ -68,17 +77,21 @@ func (g *Gemini) Translate(ctx context.Context, text string) (string, error) {
 		if errors.As(err, &ue) {
 			err = ue.Err // the URL is noise in a log
 		}
-		return "", fmt.Errorf("gemini: %w", err)
+		return nil, fmt.Errorf("gemini: %w", err)
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 2<<20))
 	if err != nil {
-		return "", fmt.Errorf("gemini: read answer: %w", err)
+		return nil, fmt.Errorf("gemini: read answer: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("gemini: HTTP %d: %s", resp.StatusCode, apiMessage(raw))
+		return nil, fmt.Errorf("gemini: HTTP %d: %s", resp.StatusCode, apiMessage(raw))
 	}
+	return raw, nil
+}
 
+// answerText reads the translation out of the model's answer.
+func answerText(raw []byte) (string, error) {
 	var out struct {
 		Candidates []struct {
 			Content struct {

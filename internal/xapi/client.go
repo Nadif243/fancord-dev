@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -46,7 +47,6 @@ type Post struct {
 	Media   []Media
 	// MediaMissing is true when the post has media that X did not describe, so a card should say there is more to see on X.
 	MediaMissing bool
-	Metrics      Metrics
 
 	// The posts this one is built on. Each is nil when the post is not that kind. A Ref with an empty Author.Username is a post X did not include (deleted, or from a private account): it is only known by its ID.
 	Original  *Ref // the post that was reposted
@@ -62,7 +62,6 @@ type Ref struct {
 	CreatedAt    time.Time
 	Media        []Media
 	MediaMissing bool
-	Metrics      Metrics
 }
 
 // Known reports whether X described the post (and its author), not just named it.
@@ -74,18 +73,6 @@ type User struct {
 	Name      string // the display name
 	Username  string // the handle, without the @
 	AvatarURL string // a large version of the profile picture
-}
-
-// Metrics are the public counters of a post at the moment it was read.
-type Metrics struct {
-	Replies, Reposts, Likes, Quotes int
-	Views                           int
-	HasViews                        bool // X sent a view count (0 views is a real answer)
-}
-
-// Any reports whether any counter is above zero.
-func (m Metrics) Any() bool {
-	return m.Replies > 0 || m.Reposts > 0 || m.Likes > 0 || m.Quotes > 0 || m.Views > 0
 }
 
 // Media is a picture, a video or an animated GIF attached to a post.
@@ -141,8 +128,8 @@ func (m Media) VideoURL(maxBytes int64) string {
 		return mp4[0].URL
 	}
 	for _, v := range mp4 {
-		bytes := int64(v.BitRate) / 8 * int64(m.DurationMS) / 1000
-		if bytes <= maxBytes {
+		size := int64(v.BitRate) / 8 * int64(m.DurationMS) / 1000
+		if size <= maxBytes {
 			return v.URL
 		}
 	}
@@ -156,14 +143,19 @@ type Page struct {
 	Billed int
 }
 
-// Client talks to the API with one app-only bearer token.
+// Client talks to the API with one app-only bearer token. It is not safe to share between goroutines (it rewords its requests as X complains), so each part of the bot that reads X has its own.
 type Client struct {
 	token   string
 	baseURL string // a field so tests can point it at a fake server
 	http    *http.Client
 	// X's documentation calls the parameter "post.fields" in places and the API has long used "tweet.fields". We start with the long-standing one and switch once if X says it does not know it.
 	fieldsParam string
+	// noNestedMedia is set when X refused the expansion that brings the media of reposted and quoted posts (see nestedMediaExpansion); from then on it is left out.
+	noNestedMedia bool
 }
+
+// nestedMediaExpansion asks X to describe the media of the posts a post builds on. Without it, only the media of the post itself is described, and a repost's picture or video is reported as missing.
+const nestedMediaExpansion = "referenced_tweets.id.attachments.media_keys"
 
 func NewClient(bearerToken string) *Client {
 	return &Client{
@@ -174,13 +166,7 @@ func NewClient(bearerToken string) *Client {
 	}
 }
 
-// UserID looks a handle up (without the @). It costs one user read, so the caller should keep the answer.
-func (c *Client) UserID(ctx context.Context, username string) (string, error) {
-	u, err := c.User(ctx, username)
-	return u.ID, err
-}
-
-// User looks a handle up (without the @) and returns the account with its display name and picture. It costs one user read, like UserID, so the caller should keep the answer.
+// User looks a handle up (without the @) and returns the account with its display name and picture. It costs one user read, so the caller should keep the answer.
 func (c *Client) User(ctx context.Context, username string) (User, error) {
 	q := url.Values{}
 	q.Set("user.fields", "name,username,profile_image_url")
@@ -198,12 +184,7 @@ func (c *Client) User(ctx context.Context, username string) (User, error) {
 
 // Posts returns the user's posts newer than sinceID, oldest first. With an empty sinceID it returns the 5 newest (the smallest page X allows), which is enough to learn where "now" is.
 func (c *Client) Posts(ctx context.Context, userID, sinceID string) (Page, error) {
-	page, err := c.posts(ctx, userID, sinceID)
-	var se *statusError
-	if errors.As(err, &se) && se.status == http.StatusBadRequest && c.swapFieldsParam(se.message) {
-		return c.posts(ctx, userID, sinceID)
-	}
-	return page, err
+	return retrying(c, func() (Page, error) { return c.posts(ctx, userID, sinceID) })
 }
 
 // ErrNotFound means X answered, but has no such post (deleted, private, or a wrong ID). Such a lookup is not billed.
@@ -211,19 +192,28 @@ var ErrNotFound = errors.New("x post not found")
 
 // Post looks one post up by its ID. A found post is one billed read; the original of a quote or repost comes along for free and its links are included, like in Posts.
 func (c *Client) Post(ctx context.Context, id string) (Post, error) {
-	p, err := c.post(ctx, id)
+	return retrying(c, func() (Post, error) { return c.post(ctx, id) })
+}
+
+// retrying runs call, and once more when X answered 400 about something this client can reword (see adjust).
+func retrying[T any](c *Client, call func() (T, error)) (T, error) {
+	v, err := call()
 	var se *statusError
-	if errors.As(err, &se) && se.status == http.StatusBadRequest && c.swapFieldsParam(se.message) {
-		return c.post(ctx, id)
+	if errors.As(err, &se) && se.status == http.StatusBadRequest && c.adjust(se.message) {
+		return call()
 	}
-	return p, err
+	return v, err
 }
 
 // query holds what is asked of every post call: the post's own fields, and the extra objects (the posts it builds on, their authors, the media) that come back in the same answer.
 func (c *Client) query() url.Values {
 	q := url.Values{}
-	q.Set(c.fieldsParam, "created_at,entities,referenced_tweets,author_id,public_metrics,attachments,note_tweet")
-	q.Set("expansions", "referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys")
+	q.Set(c.fieldsParam, "created_at,entities,referenced_tweets,author_id,attachments,note_tweet")
+	expansions := "referenced_tweets.id,referenced_tweets.id.author_id,attachments.media_keys"
+	if !c.noNestedMedia {
+		expansions += "," + nestedMediaExpansion
+	}
+	q.Set("expansions", expansions)
 	q.Set("media.fields", "type,url,preview_image_url,variants,alt_text,width,height,duration_ms")
 	q.Set("user.fields", "name,username,profile_image_url")
 	return q
@@ -247,6 +237,15 @@ func (c *Client) post(ctx context.Context, id string) (Post, error) {
 	r := response{Data: []rawPost{*raw.Data}}
 	r.Includes.Tweets, r.Includes.Posts = raw.Includes.Tweets, raw.Includes.Posts
 	return r.page().Posts[0], nil
+}
+
+// adjust rewords the request after a 400 that names something X does not know, and reports whether it changed anything (so the call is worth repeating once).
+func (c *Client) adjust(message string) bool {
+	if !c.noNestedMedia && strings.Contains(message, nestedMediaExpansion) {
+		c.noNestedMedia = true
+		return true
+	}
+	return c.swapFieldsParam(message)
 }
 
 // swapFieldsParam switches between "tweet.fields" and "post.fields" when X's error names the one in use. It reports whether it switched.
@@ -304,13 +303,6 @@ type rawPost struct {
 	Attachments struct {
 		MediaKeys []string `json:"media_keys"`
 	} `json:"attachments"`
-	Metrics *struct {
-		Replies     int  `json:"reply_count"`
-		Reposts     int  `json:"retweet_count"`
-		Likes       int  `json:"like_count"`
-		Quotes      int  `json:"quote_count"`
-		Impressions *int `json:"impression_count"`
-	} `json:"public_metrics"`
 	// X's documentation has used both names for this list.
 	RefTweets []rawRef `json:"referenced_tweets"`
 	RefPosts  []rawRef `json:"referenced_posts"`
@@ -360,83 +352,98 @@ type response struct {
 }
 
 func (r response) page() Page {
-	originals := map[string]rawPost{}
-	for _, p := range append(append([]rawPost(nil), r.Includes.Tweets...), r.Includes.Posts...) {
-		originals[p.ID] = p
-	}
-	users := map[string]rawUser{}
-	for _, u := range r.Includes.Users {
-		users[u.ID] = u
-	}
-	media := map[string]rawMedia{}
-	for _, m := range r.Includes.Media {
-		media[m.Key] = m
-	}
-
+	l := r.lookup()
 	var out []Post
 	for _, p := range r.Data {
-		post := Post{ID: p.ID, Text: p.Text, Kind: Original, URLs: p.urls()}
-		if t, err := time.Parse(time.RFC3339, p.CreatedAt); err == nil {
-			post.CreatedAt = t
-		}
-		refs := append(append([]rawRef(nil), p.RefTweets...), p.RefPosts...)
-		post.Kind = kindOf(refs, p.Text)
-
-		// Her own caption. The link to a quoted post is dropped only when the quoted post can be shown, otherwise the reader would lose it.
-		dropQuote := ""
-		for _, ref := range refs {
-			if ref.Type == "quoted" {
-				if _, ok := originals[ref.ID]; ok {
-					dropQuote = ref.ID
-				}
-			}
-		}
-		if post.Kind != Repost {
-			post.Caption = p.caption(dropQuote)
-			post.Media, post.MediaMissing = p.media(media)
-		}
-		post.Metrics = p.metrics()
-
-		for _, ref := range refs {
-			switch ref.Type {
-			case "retweeted", "quoted":
-				if orig, ok := originals[ref.ID]; ok {
-					post.URLs = append(post.URLs, orig.urls()...)
-				}
-			}
-			var slot **Ref
-			switch ref.Type {
-			case "retweeted":
-				slot = &post.Original
-			case "quoted":
-				slot = &post.Quoted
-			case "replied_to":
-				slot = &post.RepliedTo
-			default:
-				continue
-			}
-			if *slot == nil { // the first reference of a kind wins
-				*slot = refOf(ref.ID, originals, users, media)
-			}
-		}
-		out = append(out, post)
+		out = append(out, l.post(p))
 	}
 	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
 	return Page{Posts: out, Billed: len(r.Data)}
 }
 
-// refOf describes a referenced post from the extra objects of the answer. A post X did not include comes back with only its ID.
-func refOf(id string, originals map[string]rawPost, users map[string]rawUser, media map[string]rawMedia) *Ref {
-	o, ok := originals[id]
+// lookup is the extra objects that came with an answer, by ID: the posts a post
+// builds on, their authors and the media.
+type lookup struct {
+	originals map[string]rawPost
+	users     map[string]rawUser
+	media     map[string]rawMedia
+}
+
+func (r response) lookup() lookup {
+	l := lookup{originals: map[string]rawPost{}, users: map[string]rawUser{}, media: map[string]rawMedia{}}
+	for _, p := range slices.Concat(r.Includes.Tweets, r.Includes.Posts) {
+		l.originals[p.ID] = p
+	}
+	for _, u := range r.Includes.Users {
+		l.users[u.ID] = u
+	}
+	for _, m := range r.Includes.Media {
+		l.media[m.Key] = m
+	}
+	return l
+}
+
+// post turns one post of the answer into a Post.
+func (l lookup) post(p rawPost) Post {
+	refs := slices.Concat(p.RefTweets, p.RefPosts)
+	post := Post{ID: p.ID, Text: p.Text, CreatedAt: parseTime(p.CreatedAt), Kind: kindOf(refs, p.Text), URLs: p.urls()}
+
+	if post.Kind != Repost {
+		post.Caption = p.caption(l.shownQuote(refs))
+		post.Media, post.MediaMissing = p.media(l.media)
+	}
+
+	for _, ref := range refs {
+		switch ref.Type {
+		case "retweeted", "quoted":
+			if orig, ok := l.originals[ref.ID]; ok {
+				post.URLs = append(post.URLs, orig.urls()...)
+			}
+		}
+		var slot **Ref
+		switch ref.Type {
+		case "retweeted":
+			slot = &post.Original
+		case "quoted":
+			slot = &post.Quoted
+		case "replied_to":
+			slot = &post.RepliedTo
+		default:
+			continue
+		}
+		if *slot == nil { // the first reference of a kind wins
+			*slot = l.ref(ref.ID)
+		}
+	}
+	return post
+}
+
+// shownQuote is the ID of the quoted post when the answer holds it, so the card can show it and its link is dropped from the caption; "" otherwise, and then the link stays (the reader would lose it).
+func (l lookup) shownQuote(refs []rawRef) string {
+	id := ""
+	for _, ref := range refs {
+		if _, ok := l.originals[ref.ID]; ok && ref.Type == "quoted" {
+			id = ref.ID
+		}
+	}
+	return id
+}
+
+// ref describes a referenced post from the extra objects of the answer. A post X did not include comes back with only its ID.
+func (l lookup) ref(id string) *Ref {
+	o, ok := l.originals[id]
 	if !ok {
 		return &Ref{ID: id}
 	}
-	ref := &Ref{ID: id, Author: users[o.AuthorID].user(), Caption: o.caption(""), Metrics: o.metrics()}
-	if t, err := time.Parse(time.RFC3339, o.CreatedAt); err == nil {
-		ref.CreatedAt = t
-	}
-	ref.Media, ref.MediaMissing = o.media(media)
+	ref := &Ref{ID: id, Author: l.users[o.AuthorID].user(), Caption: o.caption(""), CreatedAt: parseTime(o.CreatedAt)}
+	ref.Media, ref.MediaMissing = o.media(l.media)
 	return ref
+}
+
+// parseTime reads X's time; a missing or unreadable one is the zero time.
+func parseTime(s string) time.Time {
+	t, _ := time.Parse(time.RFC3339, s)
+	return t
 }
 
 // urls lists the links of the post, written out in full.
@@ -509,26 +516,10 @@ func (p rawPost) media(all map[string]rawMedia) (out []Media, missing bool) {
 	return out, missing
 }
 
-func (p rawPost) metrics() Metrics {
-	if p.Metrics == nil {
-		return Metrics{}
-	}
-	m := Metrics{Replies: p.Metrics.Replies, Reposts: p.Metrics.Reposts, Likes: p.Metrics.Likes, Quotes: p.Metrics.Quotes}
-	if p.Metrics.Impressions != nil {
-		m.Views, m.HasViews = *p.Metrics.Impressions, true
-	}
-	return m
-}
-
 // kindOf decides the kind from the post's references. A repost wins over a reply, and a reply over a quote. The "RT @" text is the fallback when the references are missing.
 func kindOf(refs []rawRef, text string) Kind {
 	has := func(t string) bool {
-		for _, r := range refs {
-			if r.Type == t {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(refs, func(r rawRef) bool { return r.Type == t })
 	}
 	switch {
 	case has("retweeted"), len(refs) == 0 && strings.HasPrefix(text, "RT @"):
@@ -610,15 +601,6 @@ func (e *statusError) Error() string {
 
 // Status is the HTTP status of the answer. Other packages ask for it through a small interface, so they do not need to know this type.
 func (e *statusError) Status() int { return e.status }
-
-// Status is the HTTP status of an error from X, or 0 for any other error.
-func Status(err error) int {
-	var se *statusError
-	if errors.As(err, &se) {
-		return se.status
-	}
-	return 0
-}
 
 func newStatusError(path string, status int, body []byte) error {
 	var e struct {

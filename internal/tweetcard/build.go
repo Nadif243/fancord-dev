@@ -1,7 +1,6 @@
 package tweetcard
 
 import (
-	"fmt"
 	"strings"
 	"time"
 
@@ -33,16 +32,6 @@ type Media struct {
 	Still bool
 }
 
-// Stats are the numbers shown under a card.
-type Stats struct {
-	Replies, Reposts, Likes, Views int
-	HasViews                       bool
-}
-
-func (s Stats) any() bool {
-	return s.Replies > 0 || s.Reposts > 0 || s.Likes > 0 || s.Views > 0
-}
-
 // Quote is a post that the card's post quotes.
 type Quote struct {
 	Name, Handle string
@@ -68,7 +57,6 @@ type Model struct {
 	MediaMissing bool
 
 	Quote   *Quote
-	Stats   Stats
 	ReplyTo string // ID of the post that was answered, for a link in the footnote
 }
 
@@ -79,37 +67,43 @@ func Build(m Model) Payload {
 		lead = "<@&" + m.RoleID + "> " + lead
 	}
 	header := msg.TweetHeader(m.Name, m.Handle, m.PostURL)
-	stats := formatStats(m.Stats)
+	t := fitTexts(m, lead, header)
 
-	// The parts that can be long, escaped (the escaping adds characters, so it is done before measuring).
-	var (
-		caption = escapeText(m.Caption)
-		capTr   = escapeText(m.Translation)
-		qText   string
-		qTr     string
-		qHead   string
-		cutLine bool
-	)
+	accent := accentColor
+	top := []Component{{Type: typeContainer, AccentColor: &accent, Components: layout(m, header, t)}}
+	if lead != "" { // a text display may not be empty
+		top = append([]Component{text(lead)}, top...)
+	}
+	return Payload{Flags: flagComponentsV2, Components: top, AllowedMentions: allowed(m.RoleID)}
+}
+
+// texts are the long parts of a card, escaped and cut to fit.
+type texts struct {
+	caption, translation string // of the post
+	quoteHead, quote     string // of the quoted post
+	quoteTranslation     string
+	cut                  bool // something was cut, so the footnote says so
+}
+
+// fitTexts escapes the long parts of the card and cuts them so that all the text of the message stays within Discord's limit.
+func fitTexts(m Model, lead, header string) texts {
+	// Escaping adds characters, so it is done before measuring.
+	t := texts{caption: escapeText(m.Caption), translation: escapeText(m.Translation)}
 	if m.Quote != nil {
-		qHead = msg.TweetQuoteHead(m.Quote.Name, m.Quote.Handle, m.Quote.URL)
 		var c1, c2 bool
-		qText, c1 = limitLines(escapeText(m.Quote.Text), maxQuoteLines)
-		qTr, c2 = limitLines(escapeText(m.Quote.Translation), maxQuoteLines)
-		cutLine = c1 || c2
+		t.quoteHead = msg.TweetQuoteHead(m.Quote.Name, m.Quote.Handle, m.Quote.URL)
+		t.quote, c1 = limitLines(escapeText(m.Quote.Text), maxQuoteLines)
+		t.quoteTranslation, c2 = limitLines(escapeText(m.Quote.Translation), maxQuoteLines)
+		t.cut = c1 || c2
 	}
 
 	// The room for the long parts is what the limit leaves after the parts that are always whole, up to the soft limit.
-	fixed := units(lead) + units(header) + units(qHead) + units(stats) + units(msg.TweetTranslationHead) +
+	fixed := units(lead) + units(header) + units(t.quoteHead) + units(msg.TweetTranslationHead) +
 		units(msg.TweetFootnote(m.Posted, m.PostURL, m.ReplyTo, true)) +
 		units(msg.TweetVideoStill) + units(msg.TweetMediaMissing) + slack
-	budget := textLimit - fixed
-	if budget > softLimit {
-		budget = softLimit
-	}
-	if budget < 0 {
-		budget = 0
-	}
-	parts := []*string{&caption, &qText, &capTr, &qTr}
+	budget := min(max(textLimit-fixed, 0), softLimit)
+
+	parts := []*string{&t.caption, &t.quote, &t.translation, &t.quoteTranslation}
 	lens := make([]int, len(parts))
 	for i, p := range parts {
 		lens[i] = units(*p)
@@ -117,54 +111,48 @@ func Build(m Model) Payload {
 	for i, allowed := range share(lens, budget) {
 		if lens[i] > allowed {
 			*parts[i] = cut(*parts[i], allowed)
-			cutLine = true
+			t.cut = true
 		}
 	}
+	return t
+}
 
-	// ---- the card, top to bottom
+// layout is the card, top to bottom.
+func layout(m Model, header string, t texts) []Component {
+	// The caption goes in the same section as the name, so it sits beside the picture right under the name. Outside the section it would start below the picture's whole height, leaving a blank gap under a one-line name.
 	var card []Component
+	head := []Component{text(header)}
+	if t.caption != "" {
+		head = append(head, text(t.caption))
+	}
 	if m.AvatarURL != "" {
 		card = append(card, Component{
 			Type:       typeSection,
-			Components: []Component{text(header)},
+			Components: head, // a section holds one to three text displays
 			Accessory:  &Component{Type: typeThumbnail, Media: &MediaRef{URL: m.AvatarURL}, Description: truncate(m.Name, maxAlt)},
 		})
 	} else {
-		card = append(card, text(header))
-	}
-	if caption != "" {
-		card = append(card, text(caption))
+		card = append(card, head...)
 	}
 	card = append(card, mediaParts(m.Media, m.MediaMissing)...)
 
 	if m.Quote != nil {
-		card = append(card, text(quoteBlock(qHead, qText)))
+		card = append(card, text(quoteBlock(t.quoteHead, t.quote)))
 		card = append(card, mediaParts(m.Quote.Media, m.Quote.MediaMissing)...)
 	}
 
-	if capTr != "" || qTr != "" {
+	if t.translation != "" || t.quoteTranslation != "" {
 		body := msg.TweetTranslationHead
-		if capTr != "" {
-			body += "\n" + capTr
+		if t.translation != "" {
+			body += "\n" + t.translation
 		}
-		if qTr != "" {
-			body += "\n" + quoteBlock("", qTr)
+		if t.quoteTranslation != "" {
+			body += "\n" + quoteBlock("", t.quoteTranslation)
 		}
 		card = append(card, separator(false), text(body))
 	}
 
-	card = append(card, separator(true))
-	if stats != "" {
-		card = append(card, text(stats))
-	}
-	card = append(card, text(msg.TweetFootnote(m.Posted, m.PostURL, m.ReplyTo, cutLine)))
-
-	accent := accentColor
-	top := []Component{{Type: typeContainer, AccentColor: &accent, Components: card}}
-	if lead != "" { // a text display may not be empty
-		top = append([]Component{text(lead)}, top...)
-	}
-	return Payload{Flags: flagComponentsV2, Components: top, AllowedMentions: allowed(m.RoleID)}
+	return append(card, separator(true), text(msg.TweetFootnote(m.Posted, m.PostURL, m.ReplyTo, t.cut)))
 }
 
 func allowed(roleID string) AllowedMentions {
@@ -224,40 +212,4 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return string(r[:max])
-}
-
-// formatStats is the line of numbers under a card, or "" when every number is zero (a post read a moment after it was made has none yet).
-func formatStats(s Stats) string {
-	if !s.any() {
-		return ""
-	}
-	parts := []string{
-		"💬 " + Abbrev(s.Replies),
-		"🔁 " + Abbrev(s.Reposts),
-		"❤️ " + Abbrev(s.Likes),
-	}
-	if s.HasViews {
-		parts = append(parts, "👁️ "+Abbrev(s.Views))
-	}
-	return strings.Join(parts, "   ")
-}
-
-// Abbrev writes a count short: 999, 1.2K, 123.3K, 10K, 1.5M. It rounds down, so a count never looks bigger than it is.
-func Abbrev(n int) string {
-	switch {
-	case n < 1000:
-		return fmt.Sprint(n)
-	case n < 1_000_000:
-		return short(n, 1000, "K")
-	default:
-		return short(n, 1_000_000, "M")
-	}
-}
-
-func short(n, unit int, suffix string) string {
-	tenths := n / (unit / 10) // 2338 / 100 = 23
-	if tenths%10 == 0 {
-		return fmt.Sprintf("%d%s", tenths/10, suffix)
-	}
-	return fmt.Sprintf("%d.%d%s", tenths/10, tenths%10, suffix)
 }

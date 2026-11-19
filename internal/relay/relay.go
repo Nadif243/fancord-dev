@@ -83,15 +83,13 @@ type Pinger interface {
 
 // Settings are what the relay is configured with.
 type Settings struct {
-	Username  string // her handle, without the @
-	ChannelID string // where the posts go
-	OpsID     string // where warnings go; empty: log only
+	Username string // her handle, without the @
 
-	// When set, these are asked each time instead of the two fixed IDs above, so the channels can be changed while the bot runs.
-	ChannelFn, OpsFn func() string
+	// Each of these is asked every time it is needed, so /setup can change it while the bot runs. An empty answer (or no function) means: no channel, no ops notes, no ping.
+	Channel func() string // where the posts go
+	Ops     func() string // where warnings go; empty: log only
+	Role    func() string // the role to ping with each relayed post
 
-	// RoleFn, when set, is asked each time for the role to ping with each relayed post. Empty answer (or no RoleFn): no ping.
-	RoleFn     func() string
 	Every      time.Duration // how often to check X
 	Kinds      []xapi.Kind   // which post types to relay
 	MonthlyCap int           // billed reads per month; 0 means no cap
@@ -103,6 +101,7 @@ type Settings struct {
 }
 
 const (
+	// Each call to X may take this long.
 	requestTimeout = 30 * time.Second
 	// A run of failures this long is worth a message in ops.
 	alertAfterFailures = 3
@@ -144,9 +143,8 @@ type Relay struct {
 	pinger  Pinger     // the sender, when it can also ping; nil otherwise
 	cards   CardSender // the sender, when it can post cards; nil otherwise
 
-	parent          context.Context // the context Check was given, for things that outlive one round
-	profileTryAfter time.Time       // no profile refresh before this moment
-	cardNoted       bool            // the "Discord refused a card" note was sent
+	profileTryAfter time.Time // no profile refresh before this moment
+	cardNoted       bool      // the "Discord refused a card" note was sent
 }
 
 func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Relay {
@@ -158,28 +156,38 @@ func New(src Source, st Store, send Sender, set Settings, log *slog.Logger) *Rel
 
 // announce posts one relayed post: as a card when that is on and the card can be made, otherwise as a plain link.
 func (r *Relay) announce(ctx context.Context, st State, p xapi.Post) error {
-	if r.set.Cards && r.cards != nil {
-		model, ok := r.model(ctx, st, p)
-		if !ok {
-			r.log.Info("tweet relay: not enough of the post to make a card, sending the link", "post", p.ID)
-		} else {
-			model.RoleID = r.role()
-			_, err := r.cards.SendCard(r.channel(), tweetcard.Build(model))
-			switch {
-			case err == nil:
-				return nil
-			case errors.Is(err, tweetcard.ErrRejected):
-				r.log.Warn("tweet relay: Discord refused the card, sending the link", "post", p.ID, "err", err)
-				if !r.cardNoted {
-					r.cardNoted = true
-					r.ops(msg.RelayCardRefused(err.Error()))
-				}
-			default:
-				return err // not marked handled: tried again next round
-			}
-		}
+	sent, err := r.sendCard(ctx, st, p)
+	if sent || err != nil {
+		return err // an error leaves the post unmarked: tried again next round
 	}
-	return r.announceLink(string(p.Kind), r.postURL(p.ID))
+	return r.announceLink(string(p.Kind), statusURL(r.set.Username, p.ID))
+}
+
+// sendCard posts the post as a card. It reports false, with no error, when the post goes out as a plain link instead: cards are off, there is not enough of the post to make one, or Discord refused the card.
+func (r *Relay) sendCard(ctx context.Context, st State, p xapi.Post) (bool, error) {
+	if !r.set.Cards || r.cards == nil {
+		return false, nil
+	}
+	model, ok := r.model(ctx, st, p)
+	if !ok {
+		r.log.Info("tweet relay: not enough of the post to make a card, sending the link", "post", p.ID)
+		return false, nil
+	}
+	model.RoleID = r.role()
+	_, err := r.cards.SendCard(r.channel(), tweetcard.Build(model))
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, tweetcard.ErrRejected):
+		r.log.Warn("tweet relay: Discord refused the card, sending the link", "post", p.ID, "err", err)
+		if !r.cardNoted {
+			r.cardNoted = true
+			r.ops(msg.RelayCardRefused(err.Error()))
+		}
+		return false, nil
+	default:
+		return false, err
+	}
 }
 
 // announceLink posts the plain link, pinging the tweet role when one is set.
@@ -192,12 +200,9 @@ func (r *Relay) announceLink(kind, postURL string) error {
 	return err
 }
 
-// role is the role to ping with each post, or "".
-func (r *Relay) role() string {
-	if r.set.RoleFn == nil {
-		return ""
-	}
-	return r.set.RoleFn()
+// statusURL is the address of a post on X.
+func statusURL(handle, id string) string {
+	return "https://x.com/" + handle + "/status/" + id
 }
 
 // OnLinks sets a function that is called with the YouTube videos found in a post, after the post was handled and saved. Set it before Run.
@@ -221,16 +226,12 @@ func (r *Relay) Run(ctx context.Context) {
 }
 
 // Check does one round. A failure only skips the round; the next one tries again.
-func (r *Relay) Check(parent context.Context) {
+func (r *Relay) Check(ctx context.Context) {
 	if r.now().Before(r.pausedUntil) {
 		return // waiting for credits to be added
 	}
-	r.parent = parent
-	ctx, cancel := context.WithTimeout(parent, requestTimeout)
-	defer cancel()
-
 	if err := r.round(ctx); err != nil {
-		if parent.Err() != nil {
+		if ctx.Err() != nil {
 			return // shutting down
 		}
 		r.failures++
@@ -272,25 +273,12 @@ func (r *Relay) round(ctx context.Context) error {
 	if st.Username != r.set.Username {
 		st = State{Username: r.set.Username, ReadsMonth: month, Reads: st.Reads, Links: st.Links}
 	}
-	if st.UserID == "" || r.profileDue(st) {
-		u, err := r.src.User(ctx, r.set.Username)
-		switch {
-		case err == nil:
-			st.Reads += 2 // a user read costs $0.01, twice a post read
-			st.UserID, st.ProfileName, st.ProfileAvatar, st.ProfileAt = u.ID, u.Name, u.AvatarURL, r.now().Unix()
-			if err := r.save(st); err != nil {
-				return err
-			}
-		case st.UserID == "":
-			return err // a refused call is not billed, so it is not counted
-		default:
-			// The old name and picture do. Do not ask again every round.
-			r.profileTryAfter = r.now().Add(profileRetry)
-			r.log.Warn("tweet relay: could not refresh her profile; keeping the old one", "err", err)
-		}
+	st, err := r.refreshProfile(ctx, st)
+	if err != nil {
+		return err
 	}
 
-	page, err := r.src.Posts(ctx, st.UserID, st.LastPostID)
+	page, err := r.posts(ctx, st.UserID, st.LastPostID)
 	if err != nil {
 		return err // nothing came back, so nothing was billed
 	}
@@ -308,10 +296,37 @@ func (r *Relay) round(ctx context.Context) error {
 				return err
 			}
 		}
-		return r.afterReads(st)
+	} else if err := r.relayPosts(ctx, st, page.Posts); err != nil {
+		return err
 	}
+	r.warnBudget(st)
+	return nil
+}
 
-	for _, p := range page.Posts {
+// refreshProfile looks her up when her ID is not known yet or her name and picture are due for a refresh, and keeps what it learned.
+func (r *Relay) refreshProfile(ctx context.Context, st State) (State, error) {
+	if st.UserID != "" && !r.profileDue(st) {
+		return st, nil
+	}
+	u, err := r.user(ctx)
+	switch {
+	case err == nil:
+		st.Reads += 2 // a user read costs $0.01, twice a post read
+		st.UserID, st.ProfileName, st.ProfileAvatar, st.ProfileAt = u.ID, u.Name, u.AvatarURL, r.now().Unix()
+		return st, r.save(st)
+	case st.UserID == "":
+		return st, err // a refused call is not billed, so it is not counted
+	default:
+		// The old name and picture do. Do not ask again every round.
+		r.profileTryAfter = r.now().Add(profileRetry)
+		r.log.Warn("tweet relay: could not refresh her profile; keeping the old one", "err", err)
+		return st, nil
+	}
+}
+
+// relayPosts posts the new ones (oldest first), remembering each as it is done.
+func (r *Relay) relayPosts(ctx context.Context, st State, posts []xapi.Post) error {
+	for _, p := range posts {
 		if !xapi.Newer(p.ID, st.LastPostID) {
 			continue // the API should not repeat, but a repeat must not be posted twice
 		}
@@ -329,16 +344,28 @@ func (r *Relay) round(ctx context.Context) error {
 			r.onLinks(p.ID, ids)
 		}
 	}
-	return r.afterReads(st)
+	return nil
 }
 
-// afterReads warns in ops when the month's reads get close to the cap.
-func (r *Relay) afterReads(st State) error {
+// user and posts are the two calls to X, each with its own time limit.
+func (r *Relay) user(ctx context.Context) (xapi.User, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	return r.src.User(ctx, r.set.Username)
+}
+
+func (r *Relay) posts(ctx context.Context, userID, sinceID string) (xapi.Page, error) {
+	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	defer cancel()
+	return r.src.Posts(ctx, userID, sinceID)
+}
+
+// warnBudget warns in ops when the month's reads get close to the cap.
+func (r *Relay) warnBudget(st State) {
 	if cap := r.set.MonthlyCap; cap > 0 && float64(st.Reads) >= warnAt*float64(cap) && r.warned != st.ReadsMonth {
 		r.warned = st.ReadsMonth
 		r.ops(msg.RelayBudgetWarning(st.Reads, cap))
 	}
-	return nil
 }
 
 // profileDue reports whether her name and picture should be looked up again.
@@ -363,28 +390,27 @@ func (r *Relay) save(st State) error {
 	return nil
 }
 
-func (r *Relay) channel() string {
-	if r.set.ChannelFn != nil {
-		return r.set.ChannelFn()
+// ask is what a settings function says right now; a nil one says "".
+func ask(f func() string) string {
+	if f == nil {
+		return ""
 	}
-	return r.set.ChannelID
+	return f()
 }
 
+func (r *Relay) channel() string { return ask(r.set.Channel) }
+
+// role is the role to ping with each post, or "".
+func (r *Relay) role() string { return ask(r.set.Role) }
+
 func (r *Relay) ops(text string) {
-	opsID := r.set.OpsID
-	if r.set.OpsFn != nil {
-		opsID = r.set.OpsFn()
-	}
+	opsID := ask(r.set.Ops)
 	if opsID == "" {
 		return
 	}
 	if _, err := r.send.Send(opsID, text); err != nil {
 		r.log.Warn("tweet relay: could not post the ops note", "err", err)
 	}
-}
-
-func (r *Relay) postURL(id string) string {
-	return "https://x.com/" + r.set.Username + "/status/" + id
 }
 
 // linkIDs lists the YouTube videos linked in a post, once each.

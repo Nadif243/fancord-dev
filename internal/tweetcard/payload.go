@@ -70,25 +70,6 @@ type Payload struct {
 	AllowedMentions AllowedMentions `json:"allowed_mentions"`
 }
 
-// TextUnits counts the characters of all text displays together, the number Discord limits (UTF-16 units, the cautious way to count).
-func (p Payload) TextUnits() int {
-	var n int
-	var walk func([]Component)
-	walk = func(list []Component) {
-		for _, c := range list {
-			if c.Type == typeText {
-				n += units(c.Content)
-			}
-			walk(c.Components)
-			if c.Accessory != nil {
-				walk([]Component{*c.Accessory})
-			}
-		}
-	}
-	walk(p.Components)
-	return n
-}
-
 func text(s string) Component { return Component{Type: typeText, Content: s} }
 
 func separator(line bool) Component {

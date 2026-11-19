@@ -338,11 +338,9 @@ func buildRelay(
 	}
 	rel := relay.New(xapi.NewClient(cfg.X.BearerToken), memory, messenger, relay.Settings{
 		Username:   cfg.X.Username,
-		ChannelID:  cfg.Channels.Tweets,
-		OpsID:      cfg.Channels.Ops,
-		ChannelFn:  live.Getter(settings.Tweets),
-		OpsFn:      live.Getter(settings.Ops),
-		RoleFn:     live.Getter(settings.TweetPing),
+		Channel:    live.Getter(settings.Tweets),
+		Ops:        live.Getter(settings.Ops),
+		Role:       live.Getter(settings.TweetPing),
 		Every:      cfg.X.PollEvery,
 		Kinds:      kinds,
 		MonthlyCap: cfg.X.MonthlyCap,

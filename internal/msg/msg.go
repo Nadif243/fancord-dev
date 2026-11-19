@@ -47,11 +47,10 @@ const (
 	DevCheckNoChannel          = "Belum ada channel. Isi YOUTUBE_CHANNEL_ID di .env atau isi opsi channel."
 )
 
-// StreamUpcoming announces a scheduled stream. The start time is shown twice: as a full date and as "in 2 hours", both rendered by Discord for each viewer.
-
-// StreamUpcomingHead starts every announcement of her own waiting rooms. The bot recognises its own waiting rooms by it (a collab on another channel starts differently).
+// StreamUpcomingHead starts every announcement of her own waiting rooms. The bot recognises its own waiting rooms by it (a collab on another channel starts differently): broadcast.Announcer.Waiting() finds the stored messages by this text. Changing it makes the bot forget the waiting rooms it already posted, so after a change, old ones are no longer found.
 const StreamUpcomingHead = "⏰ **Jadwal stream**"
 
+// StreamUpcoming announces a scheduled stream. The start time is shown twice: as a full date and as "in 2 hours", both rendered by Discord for each viewer.
 func StreamUpcoming(title, url string, start time.Time) string {
 	title = escape(title)
 	if start.IsZero() {
@@ -85,9 +84,9 @@ func StreamEnded(title, url string) string {
 // A premiere says so. A plain upload is one message that is never edited.
 
 func CommunityUpcoming(name, title, url string, start time.Time, premiere bool) string {
-	head := fmt.Sprintf("%s · %s: %s", StreamUpcomingHead, escape(shorten(name, 80)), escape(title))
+	head := fmt.Sprintf("%s · %s: %s", StreamUpcomingHead, shortName(name), escape(title))
 	if premiere {
-		head = fmt.Sprintf("%s · %s (premiere): %s", StreamUpcomingHead, escape(shorten(name, 80)), escape(title))
+		head = fmt.Sprintf("%s · %s (premiere): %s", StreamUpcomingHead, shortName(name), escape(title))
 	}
 	if start.IsZero() {
 		return head + "\n" + url
@@ -100,7 +99,7 @@ func CommunityLive(name, title, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere sedang tayang!"
 	}
-	return fmt.Sprintf("🔴 **%s** · %s: %s\n%s", word, escape(shorten(name, 80)), escape(title), url)
+	return fmt.Sprintf("🔴 **%s** · %s: %s\n%s", word, shortName(name), escape(title), url)
 }
 
 func CommunityEnded(name, title, url string, premiere bool) string {
@@ -108,11 +107,11 @@ func CommunityEnded(name, title, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere selesai"
 	}
-	return fmt.Sprintf("⚫ **%s** · %s: %s\n%s", word, escape(shorten(name, 80)), escape(title), url)
+	return fmt.Sprintf("⚫ **%s** · %s: %s\n%s", word, shortName(name), escape(title), url)
 }
 
 func CommunityVideo(name, title, url string, short bool) string {
-	return fmt.Sprintf("%s · %s: %s\n%s", videoHead(short), escape(shorten(name, 80)), escape(title), url)
+	return fmt.Sprintf("%s · %s: %s\n%s", videoHead(short), shortName(name), escape(title), url)
 }
 
 // The pings of the community channel (one role, if any, for all of them). The link is in <angle brackets> so Discord does not show a second preview.
@@ -122,7 +121,7 @@ func PingCommunityUpcoming(roleID, name, title, url string, start time.Time, pre
 	if premiere {
 		what = "Jadwal premiere baru"
 	}
-	head := fmt.Sprintf("⏰ <@&%s> **%s** · %s: %s", roleID, what, escape(shorten(name, 80)), escape(title))
+	head := fmt.Sprintf("⏰ <@&%s> **%s** · %s: %s", roleID, what, shortName(name), escape(title))
 	if start.IsZero() {
 		return fmt.Sprintf("%s\n<%s>", head, url)
 	}
@@ -134,11 +133,11 @@ func PingCommunityLive(roleID, name, title, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere sedang tayang!"
 	}
-	return fmt.Sprintf("🔴 <@&%s> **%s** · %s: %s\n<%s>", roleID, word, escape(shorten(name, 80)), escape(title), url)
+	return fmt.Sprintf("🔴 <@&%s> **%s** · %s: %s\n<%s>", roleID, word, shortName(name), escape(title), url)
 }
 
 func PingCommunityVideo(roleID, name, title, url string, short bool) string {
-	return fmt.Sprintf("%s · %s: %s\n<%s>", videoPingHead(roleID, short), escape(shorten(name, 80)), escape(title), url)
+	return fmt.Sprintf("%s · %s: %s\n<%s>", videoPingHead(roleID, short), shortName(name), escape(title), url)
 }
 
 // A new video or Short on her own channel: one message, never edited, and a ping of the same role as her streams.
@@ -168,9 +167,9 @@ func videoPingHead(roleID string, short bool) string {
 // The three messages for a collab on somebody else's channel. They follow the same life as her own streams: waiting room, live, ended. A premiere (a finished video released with a countdown) says so.
 
 func CollabUpcoming(title, channel, url string, start time.Time, premiere bool) string {
-	head := fmt.Sprintf("🤝 **Collab Yuura di channel lain**: %s\n📺 %s", escape(title), escape(shorten(channel, 80)))
+	head := fmt.Sprintf("🤝 **Collab Yuura di channel lain**: %s\n📺 %s", escape(title), shortName(channel))
 	if premiere {
-		head = fmt.Sprintf("🤝 **Collab Yuura di channel lain (premiere)**: %s\n📺 %s", escape(title), escape(shorten(channel, 80)))
+		head = fmt.Sprintf("🤝 **Collab Yuura di channel lain (premiere)**: %s\n📺 %s", escape(title), shortName(channel))
 	}
 	if start.IsZero() {
 		return head + "\n" + url
@@ -183,7 +182,7 @@ func CollabLive(title, channel, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere collab sedang tayang!"
 	}
-	return fmt.Sprintf("🔴 **%s** %s\n📺 %s\n%s", word, escape(title), escape(shorten(channel, 80)), url)
+	return fmt.Sprintf("🔴 **%s** %s\n📺 %s\n%s", word, escape(title), shortName(channel), url)
 }
 
 func CollabEnded(title, channel, url string, premiere bool) string {
@@ -191,7 +190,7 @@ func CollabEnded(title, channel, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere collab selesai"
 	}
-	return fmt.Sprintf("⚫ **%s**: %s\n📺 %s\n%s", word, escape(title), escape(shorten(channel, 80)), url)
+	return fmt.Sprintf("⚫ **%s**: %s\n📺 %s\n%s", word, escape(title), shortName(channel), url)
 }
 
 // PingCollabUpcoming and PingCollabLive are the role pings for a collab, sent to the same roles as the pings for her own streams.
@@ -200,7 +199,7 @@ func PingCollabUpcoming(roleID, title, channel, url string, start time.Time, pre
 	if premiere {
 		word = "Jadwal premiere collab baru"
 	}
-	text := fmt.Sprintf("⏰ <@&%s> **%s**: %s\n📺 %s", roleID, word, escape(title), escape(shorten(channel, 80)))
+	text := fmt.Sprintf("⏰ <@&%s> **%s**: %s\n📺 %s", roleID, word, escape(title), shortName(channel))
 	if !start.IsZero() {
 		text += fmt.Sprintf("\nMulai %s (%s)", stampFull(start), stamp(start))
 	}
@@ -212,7 +211,7 @@ func PingCollabLive(roleID, title, channel, url string, premiere bool) string {
 	if premiere {
 		word = "Premiere collab sedang tayang!"
 	}
-	return fmt.Sprintf("🔴 <@&%s> **%s** %s\n📺 %s\n<%s>", roleID, word, escape(title), escape(shorten(channel, 80)), url)
+	return fmt.Sprintf("🔴 <@&%s> **%s** %s\n📺 %s\n<%s>", roleID, word, escape(title), shortName(channel), url)
 }
 
 // PingUpcoming is the separate message that mentions the "new waiting room" role. The link is in <angle brackets> so Discord does not show a second preview; the announcement itself already has one.
@@ -333,18 +332,18 @@ func Recap(w RecapWeek) []string {
 	if len(w.Streams) == 0 {
 		b.WriteString("Minggu ini Yuura tidak stream di channelnya sendiri.")
 	} else {
-		b.WriteString(fmt.Sprintf("Yuura stream **%d kali**", len(w.Streams)))
+		fmt.Fprintf(&b, "Yuura stream **%d kali**", len(w.Streams))
 		if w.Total > 0 {
-			b.WriteString(fmt.Sprintf(", total **%s**", duration(w.Total)))
+			fmt.Fprintf(&b, ", total **%s**", duration(w.Total))
 		}
 		b.WriteString(".")
 	}
 	if w.Longest != nil {
-		b.WriteString(fmt.Sprintf("\n🏆 Terpanjang: %s (%s)%s", recapTitle(*w.Longest), duration(w.Longest.Duration), recapWatch(*w.Longest)))
+		fmt.Fprintf(&b, "\n🏆 Terpanjang: %s (%s)%s", recapTitle(*w.Longest), duration(w.Longest.Duration), recapWatch(*w.Longest))
 	}
 	if w.Busiest != nil {
-		b.WriteString(fmt.Sprintf("\n📅 Hari tersibuk: **%s**, %s (%d stream · %s)",
-			dayNames[w.Busiest.Day.Weekday()], shortDate(w.Busiest.Day), w.Busiest.Count, duration(w.Busiest.Total)))
+		fmt.Fprintf(&b, "\n📅 Hari tersibuk: **%s**, %s (%d stream · %s)",
+			dayNames[w.Busiest.Day.Weekday()], shortDate(w.Busiest.Day), w.Busiest.Count, duration(w.Busiest.Total))
 	}
 	if len(w.Collabs) > 0 {
 		b.WriteString("\n🤝 Kolaborasi: " + collabList(w.Collabs))
@@ -806,8 +805,7 @@ func TweetQuoteHead(name, handle, link string) string {
 	return "Mengutip " + TweetHeader(name, handle, link)
 }
 
-// TweetFootnote is the small line at the bottom of a card. The time is drawn by
-// Discord in each reader's own time zone. replyToID, when set, adds a link to the post that was answered; cut says that long text was shortened.
+// TweetFootnote is the small line at the bottom of a card. The time is drawn by Discord in each reader's own time zone. replyToID, when set, adds a link to the post that was answered; cut says that long text was shortened.
 func TweetFootnote(posted time.Time, postURL, replyToID string, cut bool) string {
 	parts := []string{"X"}
 	if !posted.IsZero() {
@@ -881,14 +879,20 @@ func escapeAll(list []string) string {
 	return strings.Join(parts, ", ")
 }
 
-// shorten cuts s to at most max characters (not bytes, so no emoji or Japanese character is ever cut in half).
-func shorten(s string, max int) string {
+// shorten cuts s to at most n characters (not bytes, so no emoji or Japanese character is ever cut in half).
+func shorten(s string, n int) string {
 	r := []rune(s)
-	if len(r) <= max {
+	if len(r) <= n {
 		return s
 	}
-	return string(r[:max-1]) + "…"
+	return string(r[:n-1]) + "…"
 }
+
+// nameMax is the longest channel name shown in a message.
+const nameMax = 80
+
+// shortName is a channel's name as a message shows it: cut first, then escaped, so an escape is never cut in half.
+func shortName(s string) string { return escape(shorten(s, nameMax)) }
 
 // Pong answers /ping. The gateway latency is 0 until Discord has answered the first heartbeat, so it is left out then.
 func Pong(latency time.Duration) string {
@@ -932,7 +936,7 @@ const (
 	RodokSelf = "Malu dikit, masa gooning di publik."
 	RodokBot  = "Don't be a clanker?? :(( #RobotLivesMatter"
 
-	// RodokProtected is the answer when the person picked has the protected role (see discord.rodokProtectedRole).
+	// RodokProtected is the answer when the person picked has the protected role (ROLE_RODOK_PROTECTED in .env).
 	RodokProtected = "Adik ini belum legal, gaboleh dirodok."
 )
 
@@ -994,7 +998,7 @@ func RodokCooling(wait time.Duration) string {
 }
 
 func RodokLocked(wait time.Duration) string {
-	return fmt.Sprintf("Jomok bgt njirr. Sabar, boleh rodok %s detik lagi.", duration(wait))
+	return fmt.Sprintf("Jomok bgt njirr. Sabar, boleh rodok %s lagi.", duration(wait))
 }
 
 // ---- /setup (English: for the fancord head and staff) ---------------------

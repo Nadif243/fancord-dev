@@ -7,8 +7,8 @@ import (
 	"slices"
 	"time"
 
-	"github.com/Nadif243/fancord-bot/internal/relay"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
+	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
 // Limits on what one message or one person may send.
@@ -16,7 +16,7 @@ const (
 	maxYouTube   = 5                // YouTube links taken from one message
 	maxXPosts    = 3                // X posts read for one message
 	rateWindow   = time.Minute      // a person may send rateMax messages in this time
-	rateMax      = 3                //
+	rateMax      = 3                // (see rateWindow)
 	xLookupLimit = 10 * time.Second // one X lookup
 )
 
@@ -67,7 +67,7 @@ func XPostIDs(text string) []string {
 
 // Submit takes what a person typed: YouTube links go straight to the lookup, and (when allowX is set and X is on) X posts are read once for the YouTube links inside them. who identifies the person for the rate limit; name is shown to the reviewers.
 func (s *Service) Submit(ctx context.Context, who, name, text string, allowX bool) Reply {
-	yt := YouTubeIDs(text)
+	yt := youtube.VideoIDsIn(text)
 	xs := XPostIDs(text)
 	if len(yt) == 0 && len(xs) == 0 {
 		return Reply{Outcome: NoLink}
@@ -80,43 +80,54 @@ func (s *Service) Submit(ctx context.Context, who, name, text string, allowX boo
 	}
 
 	queued := s.Enqueue("manual", name, yt[:min(len(yt), maxYouTube)]...)
-	known := len(yt) > 0
-
-	var capHit, failed, notFound, noLink bool
+	x := xResult{known: len(yt) > 0}
 	if allowX && s.x != nil {
-		for _, id := range xs[:min(len(xs), maxXPosts)] {
-			ids, problem := s.readPost(ctx, id)
-			switch problem {
-			case problemNone:
-				if len(ids) == 0 {
-					noLink = true
-					continue
-				}
-				known = true
-				queued += s.Enqueue("xlink", id, ids...)
-			case problemCap:
-				capHit = true
-			case problemFailed:
-				failed = true
-			case problemNotFound:
-				notFound = true
-			}
-		}
+		queued += s.fromX(ctx, xs[:min(len(xs), maxXPosts)], &x)
 	}
 
 	switch {
 	case queued > 0:
 		return Reply{Outcome: Queued, New: queued}
-	case capHit:
+	case x.capHit:
 		return Reply{Outcome: XCapReached}
-	case failed:
+	case x.failed:
 		return Reply{Outcome: XFailed}
-	case notFound:
+	case x.notFound:
 		return Reply{Outcome: XNotFound}
-	case noLink && !known:
+	case x.noLink && !x.known:
 		return Reply{Outcome: XNoLink}
 	}
 	return Reply{Outcome: Known}
+}
+
+// xResult is what reading the X posts of one message turned up, besides the videos queued.
+type xResult struct {
+	known                            bool // something was already known: a YouTube link in the text, or a post with videos
+	capHit, failed, notFound, noLink bool
+}
+
+// fromX reads the X posts and queues the YouTube videos inside them. It returns how many videos were new.
+func (s *Service) fromX(ctx context.Context, posts []string, res *xResult) int {
+	queued := 0
+	for _, id := range posts {
+		ids, problem := s.readPost(ctx, id)
+		switch problem {
+		case problemNone:
+			if len(ids) == 0 {
+				res.noLink = true
+				continue
+			}
+			res.known = true
+			queued += s.Enqueue("xlink", id, ids...)
+		case problemCap:
+			res.capHit = true
+		case problemFailed:
+			res.failed = true
+		case problemNotFound:
+			res.notFound = true
+		}
+	}
+	return queued
 }
 
 type problem int
@@ -150,12 +161,7 @@ func (s *Service) readPost(ctx context.Context, id string) ([]string, problem) {
 	if _, err := s.file.AddXRead(month); err != nil {
 		s.log.Warn("collab review: could not save the X read count", "err", err)
 	}
-	var ids []string
-	for _, raw := range post.URLs {
-		if v, ok := relay.YouTubeID(raw); ok && !slices.Contains(ids, v) {
-			ids = append(ids, v)
-		}
-	}
+	ids := youtube.VideoIDs(post.URLs)
 	if err := s.file.PutTweet(id, ids, s.now()); err != nil {
 		s.log.Warn("collab review: could not save", "err", err)
 	}

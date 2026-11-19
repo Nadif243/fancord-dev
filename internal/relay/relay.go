@@ -11,15 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"net/url"
-	"regexp"
 	"slices"
-	"strings"
 	"time"
 
 	"github.com/Nadif243/fancord-bot/internal/msg"
 	"github.com/Nadif243/fancord-bot/internal/tweetcard"
 	"github.com/Nadif243/fancord-bot/internal/xapi"
+	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
 // Link is a YouTube video found in one of her posts (or in the post it reposts or quotes).
@@ -414,15 +412,7 @@ func (r *Relay) ops(text string) {
 }
 
 // linkIDs lists the YouTube videos linked in a post, once each.
-func linkIDs(p xapi.Post) []string {
-	var ids []string
-	for _, raw := range p.URLs {
-		if id, ok := YouTubeID(raw); ok && !slices.Contains(ids, id) {
-			ids = append(ids, id)
-		}
-	}
-	return ids
-}
+func linkIDs(p xapi.Post) []string { return youtube.VideoIDs(p.URLs) }
 
 // appendLinks adds the YouTube videos found in the post, once each per post, and keeps at most maxLinks.
 func appendLinks(links []Link, p xapi.Post, now time.Time) []Link {
@@ -433,29 +423,4 @@ func appendLinks(links []Link, p xapi.Post, now time.Time) []Link {
 		links = append([]Link(nil), links[over:]...)
 	}
 	return links
-}
-
-var videoID = regexp.MustCompile(`^[A-Za-z0-9_-]{11}$`)
-
-// YouTubeID reads a video ID from a YouTube link: watch?v=, youtu.be/, /live/, /shorts/ and /embed/. It reports false for anything else (a channel, a playlist, another site).
-func YouTubeID(raw string) (string, bool) {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Host == "" {
-		return "", false
-	}
-	host := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(u.Hostname()), "www."), "m.")
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	var id string
-	switch {
-	case host == "youtu.be":
-		id = parts[0]
-	case host == "youtube.com" || host == "music.youtube.com":
-		switch {
-		case parts[0] == "watch":
-			id = u.Query().Get("v")
-		case len(parts) >= 2 && (parts[0] == "live" || parts[0] == "shorts" || parts[0] == "embed"):
-			id = parts[1]
-		}
-	}
-	return id, videoID.MatchString(id)
 }

@@ -3,7 +3,6 @@ package collabs
 import (
 	"errors"
 	"fmt"
-	"net/url"
 	"slices"
 	"strings"
 	"sync"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/Nadif243/fancord-bot/internal/history"
 	"github.com/Nadif243/fancord-bot/internal/partners"
+	"github.com/Nadif243/fancord-bot/internal/youtube"
 )
 
 var (
@@ -165,22 +165,8 @@ func without(a, b []string) []string {
 // VideoID reads what a person gave as "the stream": a bare video ID, or a YouTube link in any of its usual shapes (watch?v=, youtu.be/, /live/, /shorts/, /embed/). Anything else is returned as typed, so the lookup in the history fails and the person is told the stream is unknown.
 func VideoID(input string) string {
 	in := strings.TrimSpace(input)
-	u, err := url.Parse(in)
-	if err != nil || u.Host == "" {
-		return in // a bare video ID has no host, so it comes back as typed
-	}
-	host := strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(u.Hostname()), "www."), "m.")
-	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
-	switch {
-	case host == "youtu.be" && parts[0] != "":
-		return parts[0]
-	case host == "youtube.com" || host == "music.youtube.com":
-		if v := u.Query().Get("v"); v != "" {
-			return v
-		}
-		if len(parts) == 2 && (parts[0] == "live" || parts[0] == "shorts" || parts[0] == "embed") {
-			return parts[1]
-		}
+	if id, ok := youtube.VideoID(in); ok {
+		return id
 	}
 	return in
 }

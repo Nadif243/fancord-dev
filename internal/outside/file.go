@@ -12,7 +12,6 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	"path/filepath"
 	"sort"
 	"sync"
 	"time"
@@ -97,11 +96,6 @@ var ErrUnknown = errors.New("unknown video")
 // OpenFile reads the file, creating it on first run. A file that cannot be understood is an error: carrying on with an empty one would show every old candidate to the reviewers again.
 func OpenFile(path string) (*File, error) {
 	f := &File{path: path, data: fileData{Version: formatVersion, Items: map[string]Item{}, IgnoredChannels: map[string]string{}, Tweets: map[string]TweetLook{}}}
-	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("cannot create the folder for %s: %w", path, err)
-		}
-	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		if err := f.save(); err != nil {

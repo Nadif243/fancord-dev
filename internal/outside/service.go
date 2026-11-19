@@ -3,7 +3,6 @@ package outside
 import (
 	"context"
 	"log/slog"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -76,8 +75,7 @@ type Announcer interface {
 
 // Settings are the choices from the config.
 type Settings struct {
-	ChannelID      string        // where the review messages go
-	ChannelFn      func() string // when set, asked each time instead of ChannelID
+	Channel        func() string // where the review messages go; asked each time, so /setup applies at once
 	OwnChannelID   string        // her channel: its videos are not "other channels"
 	MentionWords   []string      // words that show a video is about her
 	IgnoreChannels []string      // channel IDs that are never shown
@@ -116,10 +114,12 @@ func (s *Service) WithAnnouncer(a Announcer) *Service {
 }
 
 func New(f *File, v Videos, p Poster, m Matcher, set Settings, log *slog.Logger) *Service {
-	for i := range set.MentionWords {
-		set.MentionWords[i] = strings.ToLower(strings.TrimSpace(set.MentionWords[i]))
+	// Clone first: the caller's slice (the config) must not be changed.
+	words := slices.Clone(set.MentionWords)
+	for i := range words {
+		words[i] = strings.ToLower(strings.TrimSpace(words[i]))
 	}
-	set.MentionWords = slices.DeleteFunc(slices.Clone(set.MentionWords), func(w string) bool { return w == "" })
+	set.MentionWords = slices.DeleteFunc(words, func(w string) bool { return w == "" })
 	return &Service{file: f, vids: v, post: p, match: m, set: set, log: log, now: time.Now,
 		queue: map[string]queued{}, recent: map[string][]time.Time{}, wake: make(chan struct{}, 1)}
 }
@@ -142,12 +142,17 @@ func (s *Service) Enqueue(source, ref string, ids ...string) int {
 	}
 	s.mu.Unlock()
 	if n > 0 {
-		select {
-		case s.wake <- struct{}{}:
-		default:
-		}
+		s.wakeUp()
 	}
 	return n
+}
+
+// wakeUp makes Run do a round now. A wake-up already waiting is enough, so this never blocks.
+func (s *Service) wakeUp() {
+	select {
+	case s.wake <- struct{}{}:
+	default:
+	}
 }
 
 // Seed re-queues the YouTube links from her recent posts, so a restart (or the first start of this feature) does not miss links the relay already saw.
@@ -274,7 +279,7 @@ func (s *Service) partners(v youtube.Video) []string {
 		return nil
 	}
 	var out []string
-	for _, name := range append(s.match.Match(v.ChannelTitle), s.match.Match(v.Title)...) {
+	for _, name := range slices.Concat(s.match.Match(v.ChannelTitle), s.match.Match(v.Title)) {
 		if !slices.Contains(out, name) {
 			out = append(out, name)
 		}
@@ -283,10 +288,10 @@ func (s *Service) partners(v youtube.Video) []string {
 }
 
 func (s *Service) reviewChannel() string {
-	if s.set.ChannelFn != nil {
-		return s.set.ChannelFn()
+	if s.set.Channel == nil {
+		return ""
 	}
-	return s.set.ChannelID
+	return s.set.Channel()
 }
 
 // postWaiting posts the review message of every pending item that has none (new ones, and ones whose post failed before).
@@ -354,10 +359,7 @@ func (s *Service) kick() {
 	s.mu.Lock()
 	s.nextCheck = time.Time{}
 	s.mu.Unlock()
-	select {
-	case s.wake <- struct{}{}:
-	default:
-	}
+	s.wakeUp()
 }
 
 // Text is the review message for a pending item.
@@ -413,27 +415,10 @@ func view(it Item) msg.CollabCandidateView {
 		state = "ended"
 	}
 	return msg.CollabCandidateView{
-		Title: it.Title, ChannelTitle: it.ChannelTitle, URL: "https://www.youtube.com/watch?v=" + it.VideoID,
+		Title: it.Title, ChannelTitle: it.ChannelTitle, URL: broadcast.WatchURL(it.VideoID),
 		State: state, Premiere: it.Kind == broadcast.KindPremiere, Start: it.Start,
 		Mentions: it.Mentions, Partners: it.Partners, Source: it.Source, SourceRef: it.SourceRef,
 	}
-}
-
-var linkText = regexp.MustCompile(`(?i)(?:https?://)?(?:www\.|m\.|music\.)?(?:youtube\.com|youtu\.be)/[^\s<>()\[\]]+`)
-
-// YouTubeIDs finds the YouTube videos linked in a piece of text, once each, in the order they appear.
-func YouTubeIDs(text string) []string {
-	var out []string
-	for _, raw := range linkText.FindAllString(text, -1) {
-		raw = strings.TrimRight(raw, ".,;:!?'\"")
-		if !strings.Contains(raw, "://") {
-			raw = "https://" + raw
-		}
-		if id, ok := relay.YouTubeID(raw); ok && !slices.Contains(out, id) {
-			out = append(out, id)
-		}
-	}
-	return out
 }
 
 // active lists the confirmed collabs that are still being followed.
@@ -492,56 +477,61 @@ func soon(it Item, now time.Time) bool {
 	return it.State == broadcast.Live || it.State == broadcast.Ended || it.Start.IsZero() || it.Start.Sub(now) < soonWindow
 }
 
+// settle looks at one confirmed collab again, saves what changed and announces it when it qualifies.
 func (s *Service) settle(id string, found map[string]youtube.Video) {
-	var stream broadcast.Stream
-	announce := false
+	var stream *broadcast.Stream
 	v, ok := found[id]
 	// Asked before the update: the file's lock is held inside it.
 	ignored := ok && (slices.Contains(s.set.IgnoreChannels, v.ChannelID) || s.file.ChannelIgnored(v.ChannelID))
 	it, err := s.file.Update(id, func(x *Item) bool {
-		switch {
-		case !ok:
-			x.Missing++
-			if x.Missing >= missesToGiveUp {
-				x.Done = true
-				s.log.Warn("collab review: a confirmed video is gone (deleted or private); no longer followed", "video", id)
-			}
-			return true
-		case s.set.OwnChannelID != "" && v.ChannelID == s.set.OwnChannelID, ignored:
-			x.Done = true
-			return true
-		}
-		x.Missing = 0
-		x.Title, x.ChannelID, x.ChannelTitle = v.Title, v.ChannelID, v.ChannelTitle
-		x.State, x.Kind, x.Start, x.End = v.State, v.Kind, v.Start, v.End
-		switch {
-		case v.State == 0:
-			x.Done = true // an ordinary video has no waiting room or live moment to announce
-		case v.State == broadcast.Upcoming && (v.Start.IsZero() || v.Start.Sub(s.now()) > maxAhead):
-			// no start time yet, or placeholder far ahead: not announced, looked at again
-		default:
-			announce = true
-			stream = broadcast.Stream{VideoID: id, Title: v.Title, State: v.State, Kind: v.Kind,
-				StartAt: v.Start, EndAt: v.End, Channel: v.ChannelTitle}
-			if v.State == broadcast.Ended {
-				x.Done = true
-			}
-		}
+		stream = s.followUp(x, v, ok, ignored)
 		return true
 	})
 	if err != nil {
 		s.log.Warn("collab review: could not save", "video", id, "err", err)
 	}
-	if !announce {
+	if stream == nil {
 		return
 	}
-	if err := s.announcer.Update(stream); err != nil {
+	if err := s.announcer.Update(*stream); err != nil {
 		s.log.Warn("collab review: announcement failed, will try again", "video", id, "err", err)
 		if it.Done {
 			// Not announced and not marked: try again at the next recheck.
 			_, _ = s.file.Update(id, func(x *Item) bool { x.Done = false; return true })
 		}
 	}
+}
+
+// followUp updates a confirmed collab from a fresh look at its video (found is false when YouTube no longer shows it) and returns what to announce, or nil when nothing should be announced yet.
+func (s *Service) followUp(x *Item, v youtube.Video, found, ignored bool) *broadcast.Stream {
+	switch {
+	case !found:
+		x.Missing++
+		if x.Missing >= missesToGiveUp {
+			x.Done = true
+			s.log.Warn("collab review: a confirmed video is gone (deleted or private); no longer followed", "video", x.VideoID)
+		}
+		return nil
+	case s.set.OwnChannelID != "" && v.ChannelID == s.set.OwnChannelID, ignored:
+		x.Done = true
+		return nil
+	}
+	x.Missing = 0
+	x.Title, x.ChannelID, x.ChannelTitle = v.Title, v.ChannelID, v.ChannelTitle
+	x.State, x.Kind, x.Start, x.End = v.State, v.Kind, v.Start, v.End
+
+	switch {
+	case v.State == 0:
+		x.Done = true // an ordinary video has no waiting room or live moment to announce
+		return nil
+	case v.State == broadcast.Upcoming && (v.Start.IsZero() || v.Start.Sub(s.now()) > maxAhead):
+		return nil // no start time yet, or a placeholder far ahead: not announced, looked at again
+	}
+	if v.State == broadcast.Ended {
+		x.Done = true
+	}
+	return &broadcast.Stream{VideoID: x.VideoID, Title: v.Title, State: v.State, Kind: v.Kind,
+		StartAt: v.Start, EndAt: v.End, Channel: v.ChannelTitle}
 }
 
 // Guests lists the confirmed stream collabs that ended in [from, to), for the weekly recap. A collab counts on the day it ended, like her own streams.
@@ -558,7 +548,7 @@ func (s *Service) Guests(from, to time.Time) []recap.Guest {
 		if at.IsZero() || at.Before(from) || !at.Before(to) {
 			continue
 		}
-		g := recap.Guest{Title: it.Title, Channel: it.ChannelTitle, URL: "https://www.youtube.com/watch?v=" + it.VideoID,
+		g := recap.Guest{Title: it.Title, Channel: it.ChannelTitle, URL: broadcast.WatchURL(it.VideoID),
 			Start: it.Start, Partners: slices.Clone(it.Partners)}
 		if g.Start.IsZero() {
 			g.Start = at

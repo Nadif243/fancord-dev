@@ -280,8 +280,7 @@ func buildYouTubeFeatures(
 	}
 	log.Info("collab review file ready", "path", cfg.Review.File)
 	review := outside.New(decisions, yt, messenger, book, outside.Settings{
-		ChannelID:      cfg.Channels.Approval,
-		ChannelFn:      live.Getter(settings.Review),
+		Channel:        live.Getter(settings.Review),
 		OwnChannelID:   cfg.YouTube.ChannelID,
 		MentionWords:   cfg.Review.MentionWords,
 		IgnoreChannels: cfg.Review.IgnoreChannels,
